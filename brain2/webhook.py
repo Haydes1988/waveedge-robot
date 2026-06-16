@@ -44,8 +44,8 @@ def save_trade(data):
 def place_trade(symbol, action, risk_usd):
     try:
         if symbol != "EURUSD":
-    log("BLOCKED: " + symbol + " not available on GCAPI demo")
-    return None
+            log("BLOCKED: " + symbol + " not available on GCAPI demo")
+            return None
         api = GCapiClient(username=GCAPI_USER, password=GCAPI_PASS, appkey=GCAPI_KEY)
         market_name = MARKET_MAP.get(symbol, "EUR/USD")
         market_id = MARKET_ID_MAP.get(symbol, 401484347)
