@@ -18,6 +18,11 @@ MARKET_MAP = {
     "XAUUSD": "Gold"
 }
 
+MARKET_ID_MAP = {
+    "EURUSD": 401484347,
+    "XAUUSD": 401484348
+}
+
 def log(msg):
     ts = datetime.utcnow().isoformat()
     with open(LOG_FILE, "a") as f:
@@ -39,23 +44,17 @@ def save_trade(data):
 def place_trade(symbol, action, risk_usd):
     try:
         api = GCapiClient(username=GCAPI_USER, password=GCAPI_PASS, appkey=GCAPI_KEY)
-        market_name = MARKET_MAP.get(symbol, symbol)
-        market_info = api.get_market_info(market_name)
-        market_id = market_info["MarketId"]
-        prices = api.get_prices(market_id=market_id, num_ticks=1)
-        if action == "buy":
-            offer_price = prices["PriceTicks"][0]["Ask"]
-            direction = "buy"
-        else:
-            offer_price = prices["PriceTicks"][0]["Bid"]
-            direction = "sell"
+        market_name = MARKET_MAP.get(symbol, "EUR/USD")
+        market_id = MARKET_ID_MAP.get(symbol, 401484347)
+        offer_price = api.get_prices(market_id=market_id, num_ticks=1)
         quantity = max(1000, int(risk_usd * 100))
         result = api.trade_order(
             quantity=quantity,
             offer_price=offer_price,
-            direction=direction,
+            direction=action,
             trading_acc_id=TRADING_ACC_ID,
-            market_id=market_id
+            market_id=market_id,
+            market_name=market_name
         )
         log("TRADE PLACED: " + symbol + " " + action + " qty:" + str(quantity) + " price:" + str(offer_price))
         return result
