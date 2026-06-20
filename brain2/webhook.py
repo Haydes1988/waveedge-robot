@@ -12,16 +12,8 @@ GCAPI_USER = "demo-ahedgin"
 GCAPI_PASS = "Hedgin456$"
 GCAPI_KEY = "A.Hedgin"
 TRADING_ACC_ID = 407829813
-
-MARKET_MAP = {
-    "EURUSD": "EUR/USD",
-    "XAUUSD": "Gold"
-}
-
-MARKET_ID_MAP = {
-    "EURUSD": 401484347,
-    "XAUUSD": 401484348
-}
+MARKET_ID = 401484347
+MARKET_NAME = "EUR/USD"
 
 def log(msg):
     ts = datetime.utcnow().isoformat()
@@ -41,26 +33,63 @@ def save_trade(data):
     with open(TRADE_FILE, "w") as f:
         json.dump(trades, f, indent=2)
 
-def place_trade(symbol, action, risk_usd):
+def get_live_balance(api):
+    try:
+        margin = api.get_margin_info()
+        balance = margin.get("Balance", 0)
+        if balance == 0:
+            info = api.get_account_info()
+            balance = 500
+        return float(balance)
+    except Exception as e:
+        log("BALANCE ERROR: " + str(e) + " — using fallback 500")
+        return 500.0
+
+def calculate_quantity(balance, risk_pct, entry_price, sl_price):
+    risk_dollars = balance * (risk_pct / 100.0)
+    pip_distance = abs(entry_price - sl_price)
+    if pip_distance <= 0:
+        pip_distance = 0.0010
+    quantity = (risk_dollars / pip_distance) * 0.0001 * 10000
+    quantity = max(1000, min(int(quantity), 50000))
+    return quantity, risk_dollars
+
+def place_trade(symbol, action, risk_pct, sl_price, tp1_price, tp2_price):
     try:
         if symbol != "EURUSD":
             log("BLOCKED: " + symbol + " not available on GCAPI demo")
             return None
+
         api = GCapiClient(username=GCAPI_USER, password=GCAPI_PASS, appkey=GCAPI_KEY)
-        market_name = MARKET_MAP.get(symbol, "EUR/USD")
-        market_id = MARKET_ID_MAP.get(symbol, 401484347)
-        offer_price = api.get_prices(market_id=market_id, num_ticks=1)
-        quantity = max(1000, int(risk_usd * 100))
+        balance = get_live_balance(api)
+        offer_price = api.get_prices(market_id=MARKET_ID, num_ticks=1)
+        quantity, risk_dollars = calculate_quantity(balance, risk_pct, offer_price, sl_price)
+        half_qty = int(quantity / 2)
+        remaining_qty = quantity - half_qty
+
         result = api.trade_order(
             quantity=quantity,
             offer_price=offer_price,
             direction=action,
             trading_acc_id=TRADING_ACC_ID,
-            market_id=market_id,
-            market_name=market_name
+            market_id=MARKET_ID,
+            market_name=MARKET_NAME
         )
-        log("TRADE PLACED: " + symbol + " " + action + " qty:" + str(quantity) + " price:" + str(offer_price))
-        return result
+
+        log("TRADE PLACED: " + symbol + " " + action + " balance:$" + str(round(balance,2)) + " risk:$" + str(round(risk_dollars,2)) + " qty:" + str(quantity) + " price:" + str(offer_price) + " sl:" + str(sl_price) + " tp1:" + str(tp1_price) + " tp2:" + str(tp2_price))
+
+        return {
+            "order_result": result,
+            "balance": balance,
+            "risk_dollars": risk_dollars,
+            "quantity": quantity,
+            "half_qty": half_qty,
+            "remaining_qty": remaining_qty,
+            "entry_price": offer_price,
+            "sl": sl_price,
+            "tp1": tp1_price,
+            "tp2": tp2_price
+        }
     except Exception as e:
         log("TRADE ERROR: " + str(e))
         return None
@@ -75,25 +104,35 @@ def webhook():
         if data.get("pass") != PASSPHRASE:
             log("SECURITY: Bad passphrase")
             return jsonify({"status": "unauthorized"}), 403
+
         action = data.get("action", "")
         symbol = data.get("sym", "")
         score = data.get("score", 0)
-        risk = data.get("risk", 5)
+        risk_pct = float(data.get("risk", 1.5))
+        sl_price = float(data.get("sl", 0))
+        tp1_price = float(data.get("tp1", 0))
+        tp2_price = float(data.get("tp2", 0))
         strategy = data.get("strategy", "unknown")
-        log("SIGNAL: " + strategy + " " + action + " " + symbol + " Score:" + str(score))
-        result = place_trade(symbol, action, risk)
-        trade = {
+
+        log("SIGNAL: " + strategy + " " + action + " " + symbol + " Score:" + str(score) + " Risk%:" + str(risk_pct))
+
+        trade_result = place_trade(symbol, action, risk_pct, sl_price, tp1_price, tp2_price)
+
+        trade_log = {
             "timestamp": datetime.utcnow().isoformat(),
             "strategy": strategy,
             "symbol": symbol,
             "action": action,
             "score": score,
-            "risk": risk,
-            "result": str(result),
-            "status": "executed" if result else "failed"
+            "risk_pct": risk_pct,
+            "sl": sl_price,
+            "tp1": tp1_price,
+            "tp2": tp2_price,
+            "result": str(trade_result),
+            "status": "executed" if trade_result else "failed"
         }
-        save_trade(trade)
-        return jsonify({"status": "ok", "trade": str(result)}), 200
+        save_trade(trade_log)
+        return jsonify({"status": "ok", "trade": str(trade_result)}), 200
     except Exception as e:
         log("ERROR: " + str(e))
         return jsonify({"status": "error"}), 500
@@ -103,5 +142,5 @@ def health():
     return jsonify({"status": "WaveEdge running"}), 200
 
 if __name__ == "__main__":
-    log("WaveEdge Webhook starting...")
+    log("WaveEdge Webhook v2 starting...")
     app.run(host="0.0.0.0", port=80, debug=False)
