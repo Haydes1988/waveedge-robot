@@ -14,6 +14,8 @@ GCAPI_KEY = "A.Hedgin"
 TRADING_ACC_ID = 407829813
 MARKET_ID = 401484347
 MARKET_NAME = "EUR/USD"
+DEFAULT_SL_PIPS = 20
+PIP = 0.0001
 
 def log(msg):
     ts = datetime.utcnow().isoformat()
@@ -35,23 +37,19 @@ def save_trade(data):
 
 def get_live_balance(api):
     try:
-        margin = api.get_margin_info()
-        balance = margin.get("Balance", 0)
-        if balance == 0:
-            info = api.get_account_info()
-            balance = 500
-        return float(balance)
+        info = api.get_account_info()
+        return 500.0
     except Exception as e:
-        log("BALANCE ERROR: " + str(e) + " — using fallback 500")
+        log("BALANCE ERROR: " + str(e))
         return 500.0
 
 def calculate_quantity(balance, risk_pct, entry_price, sl_price):
     risk_dollars = balance * (risk_pct / 100.0)
     pip_distance = abs(entry_price - sl_price)
-    if pip_distance <= 0:
-        pip_distance = 0.0010
-    quantity = (risk_dollars / pip_distance) * 0.0001 * 10000
-    quantity = max(1000, min(int(quantity), 50000))
+    if pip_distance < PIP * 5:
+        pip_distance = DEFAULT_SL_PIPS * PIP
+    quantity = (risk_dollars / pip_distance) * PIP * 10000
+    quantity = max(1000, min(int(quantity), 10000))
     return quantity, risk_dollars
 
 def place_trade(symbol, action, risk_pct, sl_price, tp1_price, tp2_price):
@@ -62,33 +60,48 @@ def place_trade(symbol, action, risk_pct, sl_price, tp1_price, tp2_price):
 
         api = GCapiClient(username=GCAPI_USER, password=GCAPI_PASS, appkey=GCAPI_KEY)
         balance = get_live_balance(api)
-        offer_price = api.get_prices(market_id=MARKET_ID, num_ticks=1)
-        quantity, risk_dollars = calculate_quantity(balance, risk_pct, offer_price, sl_price)
-        half_qty = int(quantity / 2)
-        remaining_qty = quantity - half_qty
+        entry_price = api.get_prices(market_id=MARKET_ID, num_ticks=1)
+
+        if sl_price == 0 or abs(entry_price - sl_price) < PIP * 5:
+            if action == "buy":
+                sl_price = round(entry_price - DEFAULT_SL_PIPS * PIP, 5)
+                tp1_price = round(entry_price + DEFAULT_SL_PIPS * PIP * 2, 5)
+                tp2_price = round(entry_price + DEFAULT_SL_PIPS * PIP * 4, 5)
+            else:
+                sl_price = round(entry_price + DEFAULT_SL_PIPS * PIP, 5)
+                tp1_price = round(entry_price - DEFAULT_SL_PIPS * PIP * 2, 5)
+                tp2_price = round(entry_price - DEFAULT_SL_PIPS * PIP * 4, 5)
+            log("DEFAULT SL APPLIED: " + str(DEFAULT_SL_PIPS) + " pips — sl:" + str(sl_price))
+
+        quantity, risk_dollars = calculate_quantity(balance, risk_pct, entry_price, sl_price)
 
         result = api.trade_order(
             quantity=quantity,
-            offer_price=offer_price,
+            offer_price=entry_price,
             direction=action,
             trading_acc_id=TRADING_ACC_ID,
             market_id=MARKET_ID,
             market_name=MARKET_NAME
         )
 
-        log("TRADE PLACED: " + symbol + " " + action + " balance:$" + str(round(balance,2)) + " risk:$" + str(round(risk_dollars,2)) + " qty:" + str(quantity) + " price:" + str(offer_price) + " sl:" + str(sl_price) + " tp1:" + str(tp1_price) + " tp2:" + str(tp2_price))
+        status = result.get("Status", 0)
+        if status == 1:
+            log("TRADE PLACED: " + symbol + " " + action + " balance:$" + str(round(balance,2)) + " risk:$" + str(round(risk_dollars,2)) + " qty:" + str(quantity) + " entry:" + str(entry_price) + " sl:" + str(sl_price) + " tp1:" + str(tp1_price) + " tp2:" + str(tp2_price))
+        else:
+            reason = result.get("StatusReason", "unknown")
+            log("TRADE REJECTED: Status:" + str(status) + " Reason:" + str(reason) + " — market may be closed or position limit reached")
 
         return {
-            "order_result": result,
+            "status_code": status,
+            "order_id": result.get("OrderId", 0),
             "balance": balance,
-            "risk_dollars": risk_dollars,
+            "risk_dollars": round(risk_dollars, 2),
             "quantity": quantity,
-            "half_qty": half_qty,
-            "remaining_qty": remaining_qty,
-            "entry_price": offer_price,
+            "entry_price": entry_price,
             "sl": sl_price,
             "tp1": tp1_price,
-            "tp2": tp2_price
+            "tp2": tp2_price,
+            "raw": result
         }
     except Exception as e:
         log("TRADE ERROR: " + str(e))
@@ -102,7 +115,7 @@ def webhook():
             log("ERROR: Empty payload")
             return jsonify({"status": "error"}), 400
         if data.get("pass") != PASSPHRASE:
-            log("SECURITY: Bad passphrase")
+            log("SECURITY: Bad passphrase from " + str(request.remote_addr))
             return jsonify({"status": "unauthorized"}), 403
 
         action = data.get("action", "")
@@ -113,6 +126,10 @@ def webhook():
         tp1_price = float(data.get("tp1", 0))
         tp2_price = float(data.get("tp2", 0))
         strategy = data.get("strategy", "unknown")
+
+        if action not in ["buy", "sell"]:
+            log("BLOCKED: Invalid action — " + str(action))
+            return jsonify({"status": "error", "msg": "invalid action"}), 400
 
         log("SIGNAL: " + strategy + " " + action + " " + symbol + " Score:" + str(score) + " Risk%:" + str(risk_pct))
 
@@ -129,18 +146,29 @@ def webhook():
             "tp1": tp1_price,
             "tp2": tp2_price,
             "result": str(trade_result),
-            "status": "executed" if trade_result else "failed"
+            "status": "executed" if trade_result and trade_result.get("status_code") == 1 else "failed"
         }
         save_trade(trade_log)
-        return jsonify({"status": "ok", "trade": str(trade_result)}), 200
+        return jsonify({"status": "ok", "result": str(trade_result)}), 200
     except Exception as e:
         log("ERROR: " + str(e))
         return jsonify({"status": "error"}), 500
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "WaveEdge running"}), 200
+    return jsonify({"status": "WaveEdge running", "version": "2.1"}), 200
+
+@app.route("/positions", methods=["GET"])
+def positions():
+    try:
+        api = GCapiClient(username=GCAPI_USER, password=GCAPI_PASS, appkey=GCAPI_KEY)
+        pos = api.list_open_positions(trading_acc_id=TRADING_ACC_ID)
+        open_count = len(pos.get("OpenPositions", []))
+        log("POSITIONS CHECK: " + str(open_count) + " open")
+        return jsonify({"open_positions": open_count, "data": pos}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    log("WaveEdge Webhook v2 starting...")
+    log("WaveEdge Webhook v2.1 starting...")
     app.run(host="0.0.0.0", port=80, debug=False)
