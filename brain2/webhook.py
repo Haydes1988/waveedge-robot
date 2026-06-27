@@ -72,7 +72,6 @@ def place_trade(symbol, action, risk_pct, sl_price, tp1_price, tp2_price):
         pip = market["pip"]
         market_id = market["id"]
         market_name = market["name"]
-
         entry_price = api.get_prices(market_id=market_id, num_ticks=1)
 
         if sl_price == 0 or abs(entry_price - sl_price) < pip * 5:
@@ -88,18 +87,29 @@ def place_trade(symbol, action, risk_pct, sl_price, tp1_price, tp2_price):
 
         quantity, risk_dollars = calculate_quantity(balance, risk_pct, entry_price, sl_price, pip)
 
-        result = api.trade_order(
-            quantity=quantity,
-            offer_price=entry_price,
-            direction=action,
-            trading_acc_id=TRADING_ACC_ID,
-            market_id=market_id,
-            market_name=market_name
-        )
+        kwargs = {
+            "quantity": quantity,
+            "offer_price": entry_price,
+            "direction": action,
+            "trading_acc_id": TRADING_ACC_ID,
+            "market_id": market_id,
+            "market_name": market_name
+        }
+
+        try:
+            kwargs["stop_loss"] = sl_price
+            kwargs["take_profit"] = tp1_price
+            result = api.trade_order(**kwargs)
+            log("TRADE+SL ATTEMPTED: sl=" + str(sl_price) + " tp1=" + str(tp1_price))
+        except TypeError:
+            log("SL PARAM NOT SUPPORTED — placing without SL")
+            kwargs.pop("stop_loss", None)
+            kwargs.pop("take_profit", None)
+            result = api.trade_order(**kwargs)
 
         status = result.get("Status", 0)
         if status == 1:
-            log("TRADE PLACED: " + symbol + " " + action + " balance:$" + str(round(balance,2)) + " risk:$" + str(round(risk_dollars,2)) + " qty:" + str(quantity) + " entry:" + str(entry_price) + " sl:" + str(sl_price) + " tp1:" + str(tp1_price) + " tp2:" + str(tp2_price))
+            log("TRADE PLACED: " + symbol + " " + action + " balance:$" + str(round(balance,2)) + " risk:$" + str(round(risk_dollars,2)) + " qty:" + str(quantity) + " entry:" + str(entry_price) + " sl:" + str(sl_price) + " tp1:" + str(tp1_price))
         else:
             reason = result.get("StatusReason", "unknown")
             log("TRADE REJECTED: " + symbol + " Status:" + str(status) + " Reason:" + str(reason))
@@ -173,7 +183,7 @@ def webhook():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "WaveEdge running", "version": "2.2", "pairs": list(MARKET_MAP.keys())}), 200
+    return jsonify({"status": "WaveEdge running", "version": "2.3", "pairs": list(MARKET_MAP.keys())}), 200
 
 @app.route("/positions", methods=["GET"])
 def positions():
@@ -187,5 +197,5 @@ def positions():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    log("WaveEdge Webhook v2.2 starting...")
+    log("WaveEdge Webhook v2.3 starting...")
     app.run(host="0.0.0.0", port=80, debug=False)
