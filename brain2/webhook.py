@@ -26,7 +26,9 @@ MARKET_MAP = {
     "USDJPY": {"id": 401484414, "name": "USD/JPY", "pip": 0.01},
     "AUDUSD": {"id": 401484317, "name": "AUD/USD", "pip": 0.0001},
     "USDCAD": {"id": 401484406, "name": "USD/CAD", "pip": 0.0001},
-    "EURGBP": {"id": 401484335, "name": "EUR/GBP", "pip": 0.0001}
+    "EURGBP": {"id": 401484335, "name": "EUR/GBP", "pip": 0.0001},
+    "USDCHF": {"id": 401484407, "name": "USD/CHF", "pip": 0.0001},
+    "NZDUSD": {"id": 401484402, "name": "NZD/USD", "pip": 0.0001}
 }
 
 
@@ -247,7 +249,7 @@ def health():
     daily_loss, _ = get_daily_loss()
     return jsonify({
         "status": "WaveEdge running",
-        "version": "2.4",
+        "version": "2.5",
         "pairs": list(MARKET_MAP.keys()),
         "daily_loss_today": daily_loss,
         "daily_loss_limit": DAILY_LOSS_LIMIT,
@@ -269,5 +271,5 @@ def positions():
 
 
 if __name__ == "__main__":
-    log("WaveEdge Webhook v2.4 starting...")
+    log("WaveEdge Webhook v2.5 starting...")
     app.run(host="0.0.0.0", port=80, debug=False)
