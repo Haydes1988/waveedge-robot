@@ -246,7 +246,11 @@ def main():
     os.makedirs(REPORT_DIR, exist_ok=True)
     log("Weekly backtest starting...")
 
-    pairs = {"EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X"}
+    pairs = {
+        "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "USDJPY=X",
+        "AUDUSD": "AUDUSD=X", "USDCAD": "USDCAD=X", "USDCHF": "USDCHF=X",
+        "NZDUSD": "NZDUSD=X"
+    }
     results_by_pair = {}
 
     for pair_name, symbol in pairs.items():
