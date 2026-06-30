@@ -24,7 +24,11 @@ STRATEGIES = {
               "tp_r": 2.0, "min_score": 7, "wt_th": 53, "gate1_mode": "ob"},
 }
 
-PAIRS = {"EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X"}
+PAIRS = {
+    "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "USDJPY=X",
+    "AUDUSD": "AUDUSD=X", "USDCAD": "USDCAD=X", "USDCHF": "USDCHF=X",
+    "NZDUSD": "NZDUSD=X"
+}
 
 
 def log(msg):
