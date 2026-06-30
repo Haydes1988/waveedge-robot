@@ -94,14 +94,29 @@ def check_outcome(df, idx, entry, sl, tp1, direction, lookahead=30):
                         "r": round((entry - tp1) / sl_dist, 2)}
     return None
 
+def get_daily_bias(df_d1, target_date):
+    """Returns the D1 bias (bull/bear) as it would have been known
+    on target_date, using only data available UP TO that date.
+    Prevents look-ahead bias."""
+    import pandas as pd
+    df_d1 = df_d1.copy()
+    df_d1['ema20'] = calc_ema(df_d1['Close'], 20)
+    df_d1.index = pd.to_datetime(df_d1.index).tz_localize(None)
+    target_date = pd.to_datetime(target_date).tz_localize(None).normalize()
+    valid = df_d1[df_d1.index < target_date]
+    if len(valid) < 20:
+        return None, None
+    last_close = float(valid['Close'].iloc[-1])
+    last_ema = float(valid['ema20'].iloc[-1])
+    return last_close > last_ema, last_close < last_ema
+
 def run_strategy(df_d1, df_exec, strategy, atr_mult, tp_r):
     import pandas as pd
     results = []
     if df_d1 is None or df_exec is None:
         return results
-    df_d1['ema20'] = calc_ema(df_d1['Close'], 20)
-    d1_bull = float(df_d1['Close'].iloc[-1]) > float(df_d1['ema20'].iloc[-1])
-    d1_bear = not d1_bull
+    df_exec = df_exec.copy()
+    df_exec.index = pd.to_datetime(df_exec.index).tz_localize(None)
     hlc3 = (df_exec['High'] + df_exec['Low'] + df_exec['Close']) / 3
     wt1, wt2 = calc_wavetrend(hlc3)
     wt_xbull = (wt1 > wt2) & (wt1.shift(1) <= wt2.shift(1))
@@ -113,6 +128,10 @@ def run_strategy(df_d1, df_exec, strategy, atr_mult, tp_r):
         if float(adx.iloc[i]) < 20:
             continue
         row = df_exec.iloc[i]
+        bar_date = row.name
+        d1_bull, d1_bear = get_daily_bias(df_d1, bar_date)
+        if d1_bull is None:
+            continue
         entry = float(row['Close'])
         a = float(atr.iloc[i]) if not pd.isna(atr.iloc[i]) else 0.0010
         if d1_bull and bool(wt_xbull.iloc[i]) and bool(rev_bull.iloc[i]):
