@@ -32,10 +32,10 @@ PIP_SIZES = {
 
 # Round number granularity per pair (price increments that matter institutionally)
 ROUND_LEVELS = {
-    "EURUSD": [0.01, 0.005],   "GBPUSD": [0.01, 0.005],
-    "USDJPY": [1.0, 0.5],       "AUDUSD": [0.01, 0.005],
-    "USDCAD": [0.01, 0.005],   "USDCHF": [0.01, 0.005],
-    "NZDUSD": [0.01, 0.005]
+    "EURUSD": [0.01],  "GBPUSD": [0.01],
+    "USDJPY": [1.0],   "AUDUSD": [0.01],
+    "USDCAD": [0.01],  "USDCHF": [0.01],
+    "NZDUSD": [0.01]
 }
 
 
@@ -202,7 +202,7 @@ def build_daily_levels(symbol):
 def near_round_number(price, pair_name, pip_size):
     """Check if price is near a psychological round number level."""
     levels = ROUND_LEVELS.get(pair_name, [0.01, 0.005])
-    buffer = pip_size * 25  # within 25 pips of any round level
+    buffer = pip_size * 8   # must be genuinely near a major round figure
     for lvl in levels:
         nearest = round(price / lvl) * lvl
         if abs(price - nearest) <= buffer:
@@ -218,8 +218,8 @@ def near_key_level(price, pwh, pwl, pdh, pdl, pair_name, pip_size):
     - Round number           (+1)
     """
     score = 0
-    buf_week = pip_size * 30  # 30 pips proximity to weekly level
-    buf_day  = pip_size * 20  # 20 pips proximity to daily level
+    buf_week = pip_size * 10  # must be close to previous week H/L
+    buf_day  = pip_size * 8   # must be tight to previous day H/L
 
     if pwh is not None and not (pwh != pwh):  # not NaN
         if abs(price - pwh) <= buf_week or abs(price - pwl) <= buf_week:
@@ -464,9 +464,9 @@ def generate_report(all_results):
 
     lines = []
     lines.append("=" * 58)
-    lines.append("  WAVEEDGE FULL-FIDELITY BACKTEST REPORT v3")
+    lines.append("  WAVEEDGE FULL-FIDELITY BACKTEST REPORT v3.1")
     lines.append(f"  {(datetime.utcnow()-timedelta(days=7)).strftime('%b %d')} - {datetime.utcnow().strftime('%b %d %Y')}")
-    lines.append("  Key Levels: PWH/PWL + PDH/PDL + Round Numbers")
+    lines.append("  Key Levels: PWH/PWL(10pip) + PDH/PDL(8pip) + Round(8pip)")
     lines.append("=" * 58)
     lines.append("")
     lines.append(f"  Total Signals : {total}")
