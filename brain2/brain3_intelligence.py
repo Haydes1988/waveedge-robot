@@ -139,12 +139,18 @@ def get_recent_performance(pair_name, lookback=15):
         with open(TRADES_FILE, "r") as f:
             trades = json.load(f)
         pair_trades = [t for t in trades if t.get("symbol") == pair_name
-                       and t.get("status") in ("executed", "closed")]
+                       and t.get("status") == "executed"
+                       and ("WIN" in str(t.get("result","")).upper()
+                            or "LOSS" in str(t.get("result","")).upper()
+                            or t.get("status") == "closed")]
         recent = pair_trades[-lookback:] if len(pair_trades) >= lookback else pair_trades
-        if not recent:
-            return 50.0, 0, 0
-        wins   = sum(1 for t in recent if "WIN" in str(t.get("result", "")).upper())
-        losses = len(recent) - wins
+        completed = [t for t in recent
+                     if "WIN" in str(t.get("result","")).upper()
+                     or "LOSS" in str(t.get("result","")).upper()]
+        if not completed:
+            return 50.0, 0, 0  # no outcome data yet — neutral, no penalty
+        wins   = sum(1 for t in completed if "WIN" in str(t.get("result","")).upper())
+        losses = len(completed) - wins
         wr     = wins / len(recent) * 100
         return round(wr, 1), wins, losses
     except Exception as e:
