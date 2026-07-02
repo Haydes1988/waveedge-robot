@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-WaveEdge Brain 3 v4 — Market Intelligence Hub + Liquidity Map
+WaveEdge Brain 3 v5 — Market Intelligence Hub + Liquidity Map + Trend Engine
 Runs every 15 minutes via cron.
-NEW in v4:
-  - Liquidity map per pair: PDH/PDL, PWH/PWL, round numbers, 20-day extremes
-  - Mitigation tracking (swept levels drop off the target list)
-  - Weekly projection: TP1/TP2/TP3 ladder in bias direction
-  - Breaking point + reversal point classification
-  - LEVEL_APPROACH alerts when price nears the breaking point
-Dual news source: ForexFactory (primary), Investing.com (secondary, may fail on VPS DNS).
-No email — alerts saved to notifications.json + brain3.log.
+NEW in v5:
+  - Multi-timeframe trend engine: H1 / H4 / D1 trend per pair (UP/DOWN/SIDEWAYS)
+  - Trend alignment verdict: ALIGNED UPTREND, ALIGNED DOWNTREND, PULLBACK, MIXED/CROSS
+  - TREND_CHANGE alerts when a pair's alignment state flips
+Retains v4: liquidity map, TP ladder, breaking/reversal points, LEVEL_APPROACH alerts,
+dual news source, change-detected alerts to notifications.json. No email.
 """
 
 import json
@@ -38,17 +36,15 @@ PIP_SIZES = {
     "NZDUSD": 0.0001
 }
 
-# Big-figure step per pair (round-number granularity)
 ROUND_STEP = {
     "EURUSD": 0.01, "GBPUSD": 0.01, "USDJPY": 1.0,
     "AUDUSD": 0.01, "USDCAD": 0.01, "USDCHF": 0.01, "NZDUSD": 0.01
 }
 
-LEVEL_APPROACH_PIPS = 15   # alert when price within this of the breaking point
+LEVEL_APPROACH_PIPS = 15
 
 
 def utcnow():
-    """Timezone-clean UTC now (kills the DeprecationWarning spam)."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
@@ -345,26 +341,73 @@ def calc_adx(high, low, close, period=14):
     return dx.ewm(span=period, adjust=False).mean()
 
 
-def get_adx_regime(symbol):
+# ─── TREND ENGINE (NEW in v5) ─────────────────────────────────────────────────
+
+def classify_trend(close_series):
+    """
+    UP       = price above EMA20 and EMA20 rising
+    DOWN     = price below EMA20 and EMA20 falling
+    SIDEWAYS = anything else (price/EMA disagree, or flat EMA)
+    """
+    try:
+        if close_series is None or len(close_series) < 25:
+            return "UNKNOWN"
+        ema    = calc_ema(close_series, 20)
+        c      = float(close_series.iloc[-1])
+        e_now  = float(ema.iloc[-1])
+        e_prev = float(ema.iloc[-4])
+        rising  = e_now > e_prev
+        falling = e_now < e_prev
+        if c > e_now and rising:
+            return "UP"
+        if c < e_now and falling:
+            return "DOWN"
+        return "SIDEWAYS"
+    except Exception:
+        return "UNKNOWN"
+
+
+def trend_alignment(t_h1, t_h4, t_d1):
+    """Combine the three timeframes into one plain-English verdict."""
+    ts = [t_h1, t_h4, t_d1]
+    if all(t == "UP" for t in ts):
+        return "UPTREND — ALL ALIGNED"
+    if all(t == "DOWN" for t in ts):
+        return "DOWNTREND — ALL ALIGNED"
+    if t_d1 == "UP" and t_h1 == "DOWN":
+        return "PULLBACK within UPTREND"
+    if t_d1 == "DOWN" and t_h1 == "UP":
+        return "PULLBACK within DOWNTREND"
+    if t_d1 == "UP":
+        return "UPTREND — partial (lower TFs mixed)"
+    if t_d1 == "DOWN":
+        return "DOWNTREND — partial (lower TFs mixed)"
+    return "SIDEWAYS / CROSS-TREND"
+
+
+def get_adx_regime_and_trends(symbol):
+    """Single H1 fetch feeds ADX regime + H1 trend + H4 trend."""
     try:
         h1 = fetch_ohlcv(symbol, "30d", "1h")
         if h1 is None or len(h1) < 60:
-            return None, "UNKNOWN"
+            return None, "UNKNOWN", "UNKNOWN", "UNKNOWN"
         h4 = h1.resample("4h", label="right", closed="right").agg(
             {"High": "max", "Low": "min", "Close": "last"}
         ).dropna()
         if len(h4) < 20:
-            return None, "UNKNOWN"
+            return None, "UNKNOWN", "UNKNOWN", "UNKNOWN"
         adx = calc_adx(h4["High"], h4["Low"], h4["Close"])
         v   = round(float(adx.iloc[-1]), 1)
-        return v, "TRENDING" if v >= 25 else "WEAK_TREND" if v >= 18 else "RANGING"
+        regime = "TRENDING" if v >= 25 else "WEAK_TREND" if v >= 18 else "RANGING"
+        t_h1 = classify_trend(h1["Close"])
+        t_h4 = classify_trend(h4["Close"])
+        return v, regime, t_h1, t_h4
     except Exception as e:
-        log(f"ADX error {symbol}: {e}")
-        return None, "UNKNOWN"
+        log(f"ADX/trend error {symbol}: {e}")
+        return None, "UNKNOWN", "UNKNOWN", "UNKNOWN"
 
 
 def get_d1_bias_and_daily(symbol):
-    """Returns (bias, d1_dataframe) so the liquidity map can reuse the data."""
     d1 = fetch_ohlcv(symbol, "3mo", "1d")
     if d1 is None or len(d1) < 25:
         return "NEUTRAL", None
@@ -414,46 +457,35 @@ def score_adjustment(wr, regime):
     return adj, (", ".join(reasons) or "conditions normal")
 
 
-# ─── LIQUIDITY MAP (NEW in v4) ────────────────────────────────────────────────
+# ─── LIQUIDITY MAP (from v4) ─────────────────────────────────────────────────
 
 def build_liquidity_map(pair_name, d1, bias):
-    """
-    Builds the per-pair liquidity map from daily data:
-      PDH/PDL, PWH/PWL, next round numbers, 20-day extremes.
-    Marks mitigation, classifies breaking point + reversal point,
-    projects a TP1->TP3 ladder in the bias direction.
-    """
     if d1 is None or len(d1) < 10:
         return None
     try:
         pip  = PIP_SIZES.get(pair_name, 0.0001)
         step = ROUND_STEP.get(pair_name, 0.01)
 
-        price = float(d1["Close"].iloc[-1])
+        price      = float(d1["Close"].iloc[-1])
         today_high = float(d1["High"].iloc[-1])
         today_low  = float(d1["Low"].iloc[-1])
 
-        # Previous day (last COMPLETED bar)
         pdh = float(d1["High"].iloc[-2])
         pdl = float(d1["Low"].iloc[-2])
 
-        # Previous week via weekly resample
         wk  = d1.resample("W", label="right", closed="right").agg(
             {"High": "max", "Low": "min"}).dropna()
         pwh = float(wk["High"].iloc[-2]) if len(wk) >= 2 else None
         pwl = float(wk["Low"].iloc[-2])  if len(wk) >= 2 else None
 
-        # Current week's range so far (rough: last 5 daily bars)
         cw = d1.iloc[-min(5, len(d1)):]
         cur_wk_high = float(cw["High"].max())
         cur_wk_low  = float(cw["Low"].min())
 
-        # 20-day extremes = bigger external liquidity
-        ext = d1.iloc[-min(20, len(d1)):]
+        ext  = d1.iloc[-min(20, len(d1)):]
         hi20 = float(ext["High"].max())
         lo20 = float(ext["Low"].min())
 
-        # Next round numbers
         rn_above = math.ceil(price / step) * step
         if rn_above <= price:
             rn_above += step
@@ -471,7 +503,6 @@ def build_liquidity_map(pair_name, d1, bias):
                 "status": "mitigated" if mitigated else "unmitigated"
             }
 
-        # Mitigation: has price already traded through it recently?
         candidates_above = [
             lvl("PDH", pdh, today_high >= pdh),
             lvl("PWH", pwh, pwh is not None and cur_wk_high >= pwh),
@@ -492,21 +523,19 @@ def build_liquidity_map(pair_name, d1, bias):
             [l for l in candidates_below if l and l["level"] < price],
             key=lambda x: -x["level"])
 
-        # Projection only when we have a directional bias
         projection = None
         if bias in ("BULL", "BEAR"):
-            with_bias   = above if bias == "BULL" else below
-            against     = below if bias == "BULL" else above
-            targets     = [l for l in with_bias if l["status"] == "unmitigated"]
-            # pad ladder with mitigated levels if fewer than 3 clean targets
-            ladder = (targets + [l for l in with_bias if l["status"] == "mitigated"])[:3]
-            breaking = targets[0] if targets else (with_bias[0] if with_bias else None)
-            reversal = against[0] if against else None
+            with_bias = above if bias == "BULL" else below
+            against   = below if bias == "BULL" else above
+            targets   = [l for l in with_bias if l["status"] == "unmitigated"]
+            ladder    = (targets + [l for l in with_bias if l["status"] == "mitigated"])[:3]
+            breaking  = targets[0] if targets else (with_bias[0] if with_bias else None)
+            reversal  = against[0] if against else None
             projection = {
                 "direction": bias,
-                "tp_ladder": ladder,           # TP1, TP2, TP3 candidates in order
-                "breaking_point": breaking,    # first unmitigated with-bias level
-                "reversal_point": reversal     # nearest against-bias defense level
+                "tp_ladder": ladder,
+                "breaking_point": breaking,
+                "reversal_point": reversal
             }
 
         return {
@@ -563,6 +592,7 @@ def detect_and_alert(prev, new):
 
     for pair, ctx in new.get("pair_context", {}).items():
         prev_ctx = prev.get("pair_context", {}).get(pair, {})
+
         if ctx.get("block") and not prev_ctx.get("block"):
             save_alert(
                 "PAIR_BLOCK",
@@ -573,7 +603,7 @@ def detect_and_alert(prev, new):
             save_alert("PAIR_CLEAR", f"{pair} unblocked — conditions improved",
                        f"{pair} is accepting signals again.")
 
-        # NEW: LEVEL_APPROACH — price closing in on the breaking point
+        # LEVEL_APPROACH (from v4)
         lm      = ctx.get("liquidity_map") or {}
         proj    = lm.get("projection") or {}
         bp      = proj.get("breaking_point") or {}
@@ -589,8 +619,22 @@ def detect_and_alert(prev, new):
                 f"Price:  {lm.get('price')}\n"
                 f"Level:  {bp['name']} at {bp['level']} — {pips_now} pips away\n"
                 f"Bias:   {proj.get('direction')}\n"
-                f"If price breaks and CLOSES beyond this level, expect continuation\n"
-                f"toward the next target. A wick-through-and-close-back = sweep/reversal."
+                f"Break-and-close beyond = continuation toward next target.\n"
+                f"Wick-through-and-close-back = sweep/reversal."
+            )
+
+        # TREND_CHANGE (NEW in v5)
+        new_state  = ctx.get("trend_state", "")
+        prev_state = prev_ctx.get("trend_state", "")
+        if prev_state and new_state and new_state != prev_state:
+            save_alert(
+                "TREND_CHANGE",
+                f"{pair} trend shift: {prev_state} -> {new_state}",
+                f"Pair: {pair}\n"
+                f"Was:  {prev_state}\n"
+                f"Now:  {new_state}\n"
+                f"H1:{ctx.get('trend_h1')} H4:{ctx.get('trend_h4')} D1:{ctx.get('trend_d1')}\n"
+                f"ADX:  {ctx.get('adx_4h')} ({ctx.get('regime')})"
             )
 
 
@@ -610,8 +654,10 @@ def build_context():
 
     pair_context = {}
     for pair_name, symbol in PAIRS.items():
-        adx_val, regime  = get_adx_regime(symbol)
+        adx_val, regime, t_h1, t_h4 = get_adx_regime_and_trends(symbol)
         bias, d1         = get_d1_bias_and_daily(symbol)
+        t_d1             = classify_trend(d1["Close"]) if d1 is not None else "UNKNOWN"
+        t_state          = trend_alignment(t_h1, t_h4, t_d1)
         wr, wins, losses = get_recent_wr(pair_name)
         adj, reason      = score_adjustment(wr, regime)
         liq_map          = build_liquidity_map(pair_name, d1, bias)
@@ -621,17 +667,16 @@ def build_context():
 
         pair_context[pair_name] = {
             "adx_4h": adx_val, "regime": regime, "bias_d1": bias,
+            "trend_h1": t_h1, "trend_h4": t_h4, "trend_d1": t_d1,
+            "trend_state": t_state,
             "recent_wr": wr, "recent_wins": wins, "recent_losses": losses,
             "score_adjustment": adj, "reason": reason,
             "block": pair_block, "block_reason": block_reason,
             "liquidity_map": liq_map
         }
         status = "BLOCKED" if pair_block else f"+{adj}" if adj else "CLEAR"
-        bp_txt = ""
-        if liq_map and liq_map.get("projection") and liq_map["projection"].get("breaking_point"):
-            bp = liq_map["projection"]["breaking_point"]
-            bp_txt = f" | break: {bp['name']}@{bp['level']} ({bp['pips']}p)"
-        log(f"{pair_name}: ADX={adx_val} {regime} | D1:{bias} | WR:{wr:.0f}% | {status}{bp_txt}")
+        log(f"{pair_name}: ADX={adx_val} {regime} | D1:{bias} | "
+            f"trend[H1:{t_h1} H4:{t_h4} D1:{t_d1}] -> {t_state} | WR:{wr:.0f}% | {status}")
 
     context = {
         "updated":              now.isoformat(),
@@ -659,7 +704,7 @@ def build_context():
 
 def print_summary(ctx):
     print("\n" + "=" * 58)
-    print("  WAVEEDGE BRAIN 3 v4 — INTELLIGENCE + LIQUIDITY MAP")
+    print("  WAVEEDGE BRAIN 3 v5 — INTELLIGENCE + TRENDS + LIQUIDITY")
     print(f"  {ctx['updated_human']}")
     print("=" * 58)
     print(f"  Mode       : {ctx['system_mode']}")
@@ -670,6 +715,11 @@ def print_summary(ctx):
         for e in upcoming[:5]:
             icon = "[H]" if e["impact"] == "HIGH" else "[M]"
             print(f"    {icon} {e['mins_away']:3}min | {e['country']:3} | {e['title'][:38]}")
+    print("-" * 58)
+    print("  TREND ENGINE (H1 / H4 / D1 -> verdict):")
+    for pair, p in ctx["pair_context"].items():
+        print(f"  {pair:8}| {p.get('trend_h1','?'):8}| {p.get('trend_h4','?'):8}| "
+              f"{p.get('trend_d1','?'):8}| {p.get('trend_state','?')}")
     print("-" * 58)
     print("  PAIR INTELLIGENCE:")
     for pair, p in ctx["pair_context"].items():
