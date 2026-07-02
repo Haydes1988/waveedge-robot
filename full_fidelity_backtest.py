@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-WaveEdge FULL-FIDELITY Weekly Backtest v3
-NEW: Key levels integration — Previous Week H/L, Previous Day H/L, Round Numbers.
-All three are score contributors (+1 each, max score now 18).
-Fixes: JPY pip calculation, pair-aware sizing.
+WaveEdge FULL-FIDELITY Weekly Backtest v4
+NEW: TP MODEL COMPARISON — every signal is scored TWICE:
+  A) Fixed R-multiple TP (current live logic: Scalp 1.5R, Day 2R)
+  B) Zone-based TP (nearest unmitigated liquidity level in trade direction:
+     PDH/PDL, PWH/PWL, round number — must be >= 0.8R away, else next level)
+Retains v3.1: key-level scoring (tight buffers), JPY pip fix, no look-ahead.
 """
 
 import json
+import math
 import os
 from datetime import datetime, timedelta
 
-LOG_FILE = "/root/waveedge/logs/backtest_full.log"
+LOG_FILE   = "/root/waveedge/logs/backtest_full.log"
 REPORT_DIR = "/root/waveedge/reports"
 
 STRATEGIES = {
@@ -30,7 +33,6 @@ PIP_SIZES = {
     "NZDUSD": 0.0001
 }
 
-# Round number granularity per pair (price increments that matter institutionally)
 ROUND_LEVELS = {
     "EURUSD": [0.01],  "GBPUSD": [0.01],
     "USDJPY": [1.0],   "AUDUSD": [0.01],
@@ -116,28 +118,14 @@ def calc_wavetrend(hlc3):
 
 
 def detect_reversal(df):
-    body = (df['Close'] - df['Open']).abs()
-    rng = df['High'] - df['Low']
+    body  = (df['Close'] - df['Open']).abs()
+    rng   = df['High'] - df['Low']
     upper = df['High'] - df[['Close', 'Open']].max(axis=1)
     lower = df[['Close', 'Open']].min(axis=1) - df['Low']
     bull_engulf = ((df['Close'] > df['Open']) & (df['Close'] > df['Open'].shift(1)) &
                    (df['Open'] < df['Close'].shift(1)) & (body > body.shift(1) * 0.8))
     bear_engulf = ((df['Close'] < df['Open']) & (df['Close'] < df['Open'].shift(1)) &
-                   (df['Open'] > df['close'].shift(1)) & (body > body.shift(1) * 0.8))
-    bull_pin = (lower >= body * 2.0) & (df['Close'] >= df['Low'] + rng * 0.6)
-    bear_pin = (upper >= body * 2.0) & (df['Close'] <= df['High'] - rng * 0.6)
-    return bull_engulf | bull_pin, bear_engulf | bear_pin
-
-
-def detect_reversal(df):
-    body = (df['Close'] - df['Open']).abs()
-    rng = df['High'] - df['Low']
-    upper = df['High'] - df[['Close', 'Open']].max(axis=1)
-    lower = df[['Close', 'Open']].min(axis=1) - df['Low']
-    bull_engulf = ((df['Close'] > df['Open']) & (df['Close'] > df['Open'].shift(1)) &
-                   (df['Open'] < df['Close'].shift(1)) & (body > body.shift(1) * 0.8))
-    bear_engulf = ((df['Close'] < df['Open']) & (df['Close'] < df['Open'].shift(1)) &
-                   (df['Open'] > df['Open'].shift(1)) & (body > body.shift(1) * 0.8))
+                   (df['Open'] > df['Close'].shift(1)) & (body > body.shift(1) * 0.8))
     bull_pin = (lower >= body * 2.0) & (df['Close'] >= df['Low'] + rng * 0.6)
     bear_pin = (upper >= body * 2.0) & (df['Close'] <= df['High'] - rng * 0.6)
     return bull_engulf | bull_pin, bear_engulf | bear_pin
@@ -163,18 +151,15 @@ def eqh_eql_columns(df, tol=0.0010):
     return eqh_swept.fillna(False), eql_swept.fillna(False)
 
 
-# ─── KEY LEVEL FUNCTIONS ──────────────────────────────────────────────────────
+# ─── KEY LEVELS (v3.1 tight buffers) ─────────────────────────────────────────
 
 def build_weekly_levels(symbol):
-    """Previous Week High and Low — major institutional reference levels."""
     try:
-        import pandas as pd
         df_daily = fetch(symbol, "3mo", "1d")
         if df_daily is None or len(df_daily) < 10:
             return None
         df_weekly = df_daily.resample('W', label='right', closed='right').agg(
-            {'High': 'max', 'Low': 'min'}
-        ).dropna()
+            {'High': 'max', 'Low': 'min'}).dropna()
         if len(df_weekly) < 3:
             return None
         pwh = df_weekly['High'].shift(1)
@@ -186,7 +171,6 @@ def build_weekly_levels(symbol):
 
 
 def build_daily_levels(symbol):
-    """Previous Day High and Low — session reference levels."""
     try:
         df_daily = fetch(symbol, "3mo", "1d")
         if df_daily is None or len(df_daily) < 5:
@@ -200,9 +184,8 @@ def build_daily_levels(symbol):
 
 
 def near_round_number(price, pair_name, pip_size):
-    """Check if price is near a psychological round number level."""
-    levels = ROUND_LEVELS.get(pair_name, [0.01, 0.005])
-    buffer = pip_size * 8   # must be genuinely near a major round figure
+    levels = ROUND_LEVELS.get(pair_name, [0.01])
+    buffer = pip_size * 8
     for lvl in levels:
         nearest = round(price / lvl) * lvl
         if abs(price - nearest) <= buffer:
@@ -211,28 +194,61 @@ def near_round_number(price, pair_name, pip_size):
 
 
 def near_key_level(price, pwh, pwl, pdh, pdl, pair_name, pip_size):
-    """
-    Returns score contribution (0, 1, 2, or 3) based on proximity to:
-    - Previous Week High/Low (+1)
-    - Previous Day High/Low  (+1)
-    - Round number           (+1)
-    """
     score = 0
-    buf_week = pip_size * 10  # must be close to previous week H/L
-    buf_day  = pip_size * 8   # must be tight to previous day H/L
-
-    if pwh is not None and not (pwh != pwh):  # not NaN
+    buf_week = pip_size * 10
+    buf_day  = pip_size * 8
+    if pwh is not None and not (pwh != pwh):
         if abs(price - pwh) <= buf_week or abs(price - pwl) <= buf_week:
             score += 1
-
     if pdh is not None and not (pdh != pdh):
         if abs(price - pdh) <= buf_day or abs(price - pdl) <= buf_day:
             score += 1
-
     if near_round_number(price, pair_name, pip_size):
         score += 1
-
     return score
+
+
+# ─── ZONE TP (NEW in v4) ──────────────────────────────────────────────────────
+
+def zone_tp(entry, direction, pwh, pwl, pdh, pdl, pair_name, risk):
+    """
+    Nearest unmitigated liquidity level in the trade direction, at least
+    0.8R away (so R:R never degenerates). Candidates: PDH/PDL, PWH/PWL,
+    next round number. Returns None if no valid level (caller falls back
+    to fixed-R — recorded as 'no zone target').
+    """
+    step = ROUND_LEVELS.get(pair_name, [0.01])[0]
+    cands = []
+    def valid(v):
+        return v is not None and not (v != v)  # not None, not NaN
+
+    if direction == "buy":
+        if valid(pdh) and pdh > entry:
+            cands.append(pdh)
+        if valid(pwh) and pwh > entry:
+            cands.append(pwh)
+        rn = math.ceil(entry / step) * step
+        if rn <= entry:
+            rn += step
+        cands.append(rn)
+        cands = sorted(set(cands))
+        for c in cands:
+            if (c - entry) >= 0.8 * risk:
+                return c
+    else:
+        if valid(pdl) and pdl < entry:
+            cands.append(pdl)
+        if valid(pwl) and pwl < entry:
+            cands.append(pwl)
+        rn = math.floor(entry / step) * step
+        if rn >= entry:
+            rn -= step
+        cands.append(rn)
+        cands = sorted(set(cands), reverse=True)
+        for c in cands:
+            if (entry - c) >= 0.8 * risk:
+                return c
+    return None
 
 
 def check_outcome(df, idx, entry, sl, tp1, direction, pip_size=0.0001, lookahead=40):
@@ -368,7 +384,6 @@ def run_full_strategy(pair_name, symbol, strategy_name, cfg,
     atr = calc_atr(merged['High'], merged['Low'], merged['Close'])
     market_trending = merged['adx'] >= 20
 
-    # Base score (max 15) — unchanged from live Pine Script
     score_bull = (merged['gate0_bull'].astype(int) * 2 + gate1_bull.astype(int) * 2 +
                   price_in_bull_fib.astype(int) * 2 + gate2_bull.astype(int) * 1 +
                   wt_xbull.astype(int) * 1 + wt_os.astype(int) * 1 +
@@ -396,48 +411,58 @@ def run_full_strategy(pair_name, symbol, strategy_name, cfg,
         bar_date = row.name
         a = float(atr.iloc[i]) if not pd.isna(atr.iloc[i]) else pip_size * 15
 
-        # Look up key levels as of this bar's date
         pwh = pwl = pdh = pdl = None
         if weekly_lvl is not None:
             wk = weekly_lvl[weekly_lvl.index <= bar_date]
             if not wk.empty:
-                pwh = float(wk['pwh'].iloc[-1])
-                pwl = float(wk['pwl'].iloc[-1])
+                pwh = float(wk['pwh'].iloc[-1]); pwl = float(wk['pwl'].iloc[-1])
         if daily_lvl is not None:
             dy = daily_lvl[daily_lvl.index <= bar_date]
             if not dy.empty:
-                pdh = float(dy['pdh'].iloc[-1])
-                pdl = float(dy['pdl'].iloc[-1])
+                pdh = float(dy['pdh'].iloc[-1]); pdl = float(dy['pdl'].iloc[-1])
 
         key_score = near_key_level(entry, pwh, pwl, pdh, pdl, pair_name, pip_size)
 
+        direction = None
         if bool(long_signal.iloc[i]):
-            final_score = int(score_bull.iloc[i]) + key_score
+            direction = "buy"
+            base_score = int(score_bull.iloc[i])
             sl  = entry - a * cfg["atr_mult"]
-            tp1 = entry + (entry - sl) * cfg["tp_r"]
-            out = check_outcome(merged, i, entry, sl, tp1, "buy", pip_size)
-            if out:
-                results.append({
-                    "time": str(row.name)[:16], "strategy": strategy_name,
-                    "pair": pair_name, "direction": "BUY",
-                    "score": final_score, "key_score": key_score,
-                    "at_key_level": key_score > 0,
-                    "result": out["result"], "pips": out["pips"], "r": out["r"]
-                })
-
         elif bool(short_signal.iloc[i]):
-            final_score = int(score_bear.iloc[i]) + key_score
+            direction = "sell"
+            base_score = int(score_bear.iloc[i])
             sl  = entry + a * cfg["atr_mult"]
-            tp1 = entry - (sl - entry) * cfg["tp_r"]
-            out = check_outcome(merged, i, entry, sl, tp1, "sell", pip_size)
-            if out:
-                results.append({
-                    "time": str(row.name)[:16], "strategy": strategy_name,
-                    "pair": pair_name, "direction": "SELL",
-                    "score": final_score, "key_score": key_score,
-                    "at_key_level": key_score > 0,
-                    "result": out["result"], "pips": out["pips"], "r": out["r"]
-                })
+
+        if direction is None:
+            continue
+
+        risk = abs(entry - sl)
+        # A) Fixed-R TP (live logic)
+        tp_fixed = entry + risk * cfg["tp_r"] if direction == "buy" else entry - risk * cfg["tp_r"]
+        out_fixed = check_outcome(merged, i, entry, sl, tp_fixed, direction, pip_size)
+        if not out_fixed:
+            continue
+
+        # B) Zone-based TP
+        ztp = zone_tp(entry, direction, pwh, pwl, pdh, pdl, pair_name, risk)
+        if ztp is not None:
+            out_zone  = check_outcome(merged, i, entry, sl, ztp, direction, pip_size)
+            zone_used = True
+        else:
+            out_zone  = out_fixed   # no valid zone target — same as fixed
+            zone_used = False
+
+        results.append({
+            "time": str(row.name)[:16], "strategy": strategy_name,
+            "pair": pair_name, "direction": direction.upper(),
+            "score": base_score + key_score, "key_score": key_score,
+            "at_key_level": key_score > 0,
+            "result": out_fixed["result"], "pips": out_fixed["pips"], "r": out_fixed["r"],
+            "zone_used": zone_used,
+            "zone_result": out_zone["result"] if out_zone else "OPEN",
+            "zone_pips":   out_zone["pips"]   if out_zone else 0.0,
+            "zone_r":      out_zone["r"]      if out_zone else 0.0
+        })
 
     return results
 
@@ -449,54 +474,74 @@ def generate_report(all_results):
         return "NO SIGNALS PASSED FULL FILTER STACK THIS WEEK."
 
     wins   = [r for r in all_results if r['result'] == 'WIN']
-    losses = [r for r in all_results if r['result'] == 'LOSS']
     total  = len(all_results)
-    wr     = len(wins) / total * 100 if total else 0
+    wr     = len(wins) / total * 100
     tp     = sum(r['pips'] for r in all_results)
-    ar     = sum(r['r'] for r in all_results) / total if total else 0
+    ar     = sum(r['r'] for r in all_results) / total
 
-    at_key   = [r for r in all_results if r['at_key_level']]
-    off_key  = [r for r in all_results if not r['at_key_level']]
-    key_wr   = len([r for r in at_key if r['result'] == 'WIN']) / len(at_key) * 100 if at_key else 0
-    off_wr   = len([r for r in off_key if r['result'] == 'WIN']) / len(off_key) * 100 if off_key else 0
-    key_r    = sum(r['r'] for r in at_key) / len(at_key) if at_key else 0
-    off_r    = sum(r['r'] for r in off_key) / len(off_key) if off_key else 0
+    # Zone comparison — only over trades where a real zone target existed
+    zone_trades = [r for r in all_results if r['zone_used'] and r['zone_result'] in ('WIN', 'LOSS')]
+    z_wr = z_tp = z_ar = 0.0
+    f_wr = f_tp = f_ar = 0.0
+    if zone_trades:
+        zw   = [r for r in zone_trades if r['zone_result'] == 'WIN']
+        z_wr = len(zw) / len(zone_trades) * 100
+        z_tp = sum(r['zone_pips'] for r in zone_trades)
+        z_ar = sum(r['zone_r'] for r in zone_trades) / len(zone_trades)
+        fw   = [r for r in zone_trades if r['result'] == 'WIN']
+        f_wr = len(fw) / len(zone_trades) * 100
+        f_tp = sum(r['pips'] for r in zone_trades)
+        f_ar = sum(r['r'] for r in zone_trades) / len(zone_trades)
+
+    at_key  = [r for r in all_results if r['at_key_level']]
+    off_key = [r for r in all_results if not r['at_key_level']]
+    key_wr  = len([r for r in at_key if r['result'] == 'WIN']) / len(at_key) * 100 if at_key else 0
+    off_wr  = len([r for r in off_key if r['result'] == 'WIN']) / len(off_key) * 100 if off_key else 0
 
     lines = []
     lines.append("=" * 58)
-    lines.append("  WAVEEDGE FULL-FIDELITY BACKTEST REPORT v3.1")
+    lines.append("  WAVEEDGE FULL-FIDELITY BACKTEST REPORT v4")
     lines.append(f"  {(datetime.utcnow()-timedelta(days=7)).strftime('%b %d')} - {datetime.utcnow().strftime('%b %d %Y')}")
-    lines.append("  Key Levels: PWH/PWL(10pip) + PDH/PDL(8pip) + Round(8pip)")
+    lines.append("  NEW: Fixed-R vs Zone-based TP comparison")
     lines.append("=" * 58)
     lines.append("")
     lines.append(f"  Total Signals : {total}")
-    lines.append(f"  Wins          : {len(wins)}")
-    lines.append(f"  Losses        : {len(losses)}")
-    lines.append(f"  Win Rate      : {wr:.1f}%")
+    lines.append(f"  Win Rate      : {wr:.1f}%   (fixed-R, live logic)")
     lines.append(f"  Total Pips    : {tp:+.1f}")
     lines.append(f"  Average R     : {ar:+.2f}")
     lines.append("")
     lines.append("-" * 58)
-    lines.append("KEY LEVEL ANALYSIS (the new insight):")
-    lines.append(f"  AT key level  : {len(at_key):4} trades | {key_wr:.0f}% WR | {key_r:+.2f} avg R")
-    lines.append(f"  OFF key level : {len(off_key):4} trades | {off_wr:.0f}% WR | {off_r:+.2f} avg R")
-    if key_wr > off_wr:
-        lines.append(f"  ✅ Key levels IMPROVE results by {key_wr-off_wr:.0f}% WR")
+    lines.append("TP MODEL COMPARISON (same entries, same stops):")
+    if zone_trades:
+        lines.append(f"  Trades with a valid zone target: {len(zone_trades)} of {total}")
+        lines.append(f"  FIXED-R : {f_wr:.0f}% WR | {f_tp:+.1f} pips | {f_ar:+.2f} avg R")
+        lines.append(f"  ZONE TP : {z_wr:.0f}% WR | {z_tp:+.1f} pips | {z_ar:+.2f} avg R")
+        if z_ar > f_ar + 0.1 or (z_wr > f_wr + 5 and z_ar >= f_ar):
+            lines.append("  VERDICT : ZONE model MEANINGFULLY BETTER — consider live upgrade")
+        elif f_ar > z_ar + 0.1 or (f_wr > z_wr + 5 and f_ar >= z_ar):
+            lines.append("  VERDICT : FIXED-R better — keep live logic as is")
+        else:
+            lines.append("  VERDICT : No meaningful edge either way — keep fixed-R (simpler)")
     else:
-        lines.append(f"  ⚠️ Key levels show no WR improvement this week")
+        lines.append("  No trades had a valid zone target this week.")
     lines.append("")
     lines.append("-" * 58)
-    lines.append("BY PAIR:")
+    lines.append("KEY LEVEL ANALYSIS:")
+    lines.append(f"  AT key level  : {len(at_key):4} trades | {key_wr:.0f}% WR")
+    lines.append(f"  OFF key level : {len(off_key):4} trades | {off_wr:.0f}% WR")
+    lines.append("")
+    lines.append("-" * 58)
+    lines.append("BY PAIR (fixed-R):")
     for pair in sorted(set(r['pair'] for r in all_results)):
         pr = [r for r in all_results if r['pair'] == pair]
         pw = len([r for r in pr if r['result'] == 'WIN'])
         pp = sum(r['pips'] for r in pr)
-        pr_key = [r for r in pr if r['at_key_level']]
-        pk_wr  = len([r for r in pr_key if r['result'] == 'WIN']) / len(pr_key) * 100 if pr_key else 0
-        lines.append(f"  {pair:8}: {len(pr):4} trades | {pw/len(pr)*100:.0f}% WR | {pp:+.1f} pips | key:{len(pr_key)} ({pk_wr:.0f}% WR)")
+        pz = [r for r in pr if r['zone_used'] and r['zone_result'] in ('WIN', 'LOSS')]
+        pz_wr = len([r for r in pz if r['zone_result'] == 'WIN']) / len(pz) * 100 if pz else 0
+        lines.append(f"  {pair:8}: {len(pr):4} trades | {pw/len(pr)*100:.0f}% WR | {pp:+.1f} pips | zoneWR:{pz_wr:.0f}%")
     lines.append("")
     lines.append("-" * 58)
-    lines.append("BY STRATEGY:")
+    lines.append("BY STRATEGY (fixed-R):")
     for strat in sorted(set(r['strategy'] for r in all_results)):
         sr = [r for r in all_results if r['strategy'] == strat]
         sw = len([r for r in sr if r['result'] == 'WIN'])
@@ -504,18 +549,17 @@ def generate_report(all_results):
         lines.append(f"  {strat:8}: {len(sr):4} trades | {sw/len(sr)*100:.0f}% WR | {sp:+.1f} pips")
     lines.append("")
     lines.append("-" * 58)
-    lines.append("ALL SIGNALS (K=at key level):")
+    lines.append("ALL SIGNALS (K=key level, Z=zone TP differed):")
     for r in sorted(all_results, key=lambda x: x['time']):
         icon = "WIN " if r['result'] == 'WIN' else "LOSS"
-        k    = "K" if r['at_key_level'] else " "
-        lines.append(
-            f"  {icon} {k} | {r['time']} | {r['pair']:7} | {r['strategy']:5} | "
-            f"{r['direction']:4} | sc:{r['score']:2} | {r['pips']:+.1f} pips | {r['r']:+.2f}R"
-        )
+        k = "K" if r['at_key_level'] else " "
+        z = "Z" if (r['zone_used'] and r['zone_result'] != r['result']) else " "
+        lines.append(f"  {icon} {k}{z}| {r['time']} | {r['pair']:7} | {r['strategy']:5} | "
+                     f"{r['direction']:4} | sc:{r['score']:2} | {r['pips']:+.1f} pips | {r['r']:+.2f}R")
     lines.append("")
     lines.append("-" * 58)
     if wr >= 50 and ar >= 0.3:
-        verdict = "STRONG — positive expectancy with key level integration"
+        verdict = "STRONG — positive expectancy confirmed"
     elif wr >= 40:
         verdict = "MARGINAL — monitor one more week"
     else:
@@ -525,11 +569,9 @@ def generate_report(all_results):
     return "\n".join(lines)
 
 
-# ─── MAIN ────────────────────────────────────────────────────────────────────
-
 def main():
     os.makedirs(REPORT_DIR, exist_ok=True)
-    log("Full-fidelity backtest v3 (key levels) starting...")
+    log("Full-fidelity backtest v4 (TP model comparison) starting...")
 
     all_results = []
     for pair_name, symbol in PAIRS.items():
@@ -539,22 +581,15 @@ def main():
         m30_ctx    = build_m30_context(symbol)
         weekly_lvl = build_weekly_levels(symbol)
         daily_lvl  = build_daily_levels(symbol)
-
         if d1_ctx is None or h4_ctx is None or m30_ctx is None:
             log(f"{pair_name}: insufficient context, skipping")
             continue
-
-        wk_ok = "✅" if weekly_lvl is not None else "❌"
-        dy_ok = "✅" if daily_lvl is not None else "❌"
-        log(f"{pair_name}: weekly_levels={wk_ok} daily_levels={dy_ok}")
-
         for strat_name, cfg in STRATEGIES.items():
-            log(f"Running {strat_name} on {pair_name}...")
             results = run_full_strategy(pair_name, symbol, strat_name, cfg,
                                         d1_ctx, h4_ctx, m30_ctx, weekly_lvl, daily_lvl)
             all_results.extend(results)
-            at_key = sum(1 for r in results if r['at_key_level'])
-            log(f"{pair_name} {strat_name}: {len(results)} signals, {at_key} at key levels")
+            zdiff = sum(1 for r in results if r['zone_used'] and r['zone_result'] != r['result'])
+            log(f"{pair_name} {strat_name}: {len(results)} signals, {zdiff} where zone TP changed outcome")
 
     report = generate_report(all_results)
     date_str = datetime.utcnow().strftime("%Y%m%d_%H%M")
