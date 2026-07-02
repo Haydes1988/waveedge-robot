@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """
-WaveEdge Brain 3 v3 — Market Intelligence Hub
+WaveEdge Brain 3 v4 — Market Intelligence Hub + Liquidity Map
 Runs every 15 minutes via cron.
-Dual news source: ForexFactory + Investing.com
-No email — all alerts saved to notifications.json and brain3.log
-Webhook reads context before every trade.
+NEW in v4:
+  - Liquidity map per pair: PDH/PDL, PWH/PWL, round numbers, 20-day extremes
+  - Mitigation tracking (swept levels drop off the target list)
+  - Weekly projection: TP1/TP2/TP3 ladder in bias direction
+  - Breaking point + reversal point classification
+  - LEVEL_APPROACH alerts when price nears the breaking point
+Dual news source: ForexFactory (primary), Investing.com (secondary, may fail on VPS DNS).
+No email — alerts saved to notifications.json + brain3.log.
 """
 
 import json
+import math
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.request import urlopen, Request
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
@@ -32,11 +38,24 @@ PIP_SIZES = {
     "NZDUSD": 0.0001
 }
 
+# Big-figure step per pair (round-number granularity)
+ROUND_STEP = {
+    "EURUSD": 0.01, "GBPUSD": 0.01, "USDJPY": 1.0,
+    "AUDUSD": 0.01, "USDCAD": 0.01, "USDCHF": 0.01, "NZDUSD": 0.01
+}
+
+LEVEL_APPROACH_PIPS = 15   # alert when price within this of the breaking point
+
+
+def utcnow():
+    """Timezone-clean UTC now (kills the DeprecationWarning spam)."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
 
 def log(msg):
-    ts = datetime.utcnow().isoformat()
+    ts = utcnow().isoformat()
     line = f"{ts} | BRAIN3 | {msg}"
     try:
         with open(LOG_FILE, "a") as f:
@@ -46,10 +65,9 @@ def log(msg):
     print(line)
 
 
-# ─── ALERT SYSTEM (no email — log only) ──────────────────────────────────────
+# ─── ALERT SYSTEM (log only, no email) ───────────────────────────────────────
 
 def save_alert(alert_type, title, body):
-    """Save alert to notifications.json — readable via /notifications endpoint."""
     try:
         alerts = []
         if os.path.exists(NOTIFY_FILE):
@@ -59,13 +77,13 @@ def save_alert(alert_type, title, body):
                 except Exception:
                     alerts = []
         alerts.append({
-            "time": datetime.utcnow().isoformat(),
-            "time_human": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+            "time": utcnow().isoformat(),
+            "time_human": utcnow().strftime("%Y-%m-%d %H:%M UTC"),
             "type": alert_type,
             "title": title,
             "body": body
         })
-        alerts = alerts[-50:]  # keep last 50
+        alerts = alerts[-50:]
         with open(NOTIFY_FILE, "w") as f:
             json.dump(alerts, f, indent=2)
         log(f"ALERT [{alert_type}] {title}")
@@ -76,7 +94,6 @@ def save_alert(alert_type, title, body):
 # ─── DUAL NEWS SOURCE ─────────────────────────────────────────────────────────
 
 def fetch_forexfactory():
-    """Primary source — ForexFactory live JSON feed."""
     try:
         req = Request(
             "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
@@ -96,7 +113,7 @@ def fetch_forexfactory():
                 "date":    e.get("date", e.get("time", "")),
                 "source":  "ForexFactory"
             })
-        log(f"ForexFactory: {len(events)} med/high events ✅")
+        log(f"ForexFactory: {len(events)} med/high events OK")
         return events
     except Exception as e:
         log(f"ForexFactory FAILED: {e}")
@@ -104,7 +121,6 @@ def fetch_forexfactory():
 
 
 def fetch_investing():
-    """Secondary source — Investing.com economic calendar."""
     try:
         import requests
         from bs4 import BeautifulSoup
@@ -112,7 +128,6 @@ def fetch_investing():
 
         today   = date.today()
         date_to = today + timedelta(days=2)
-
         headers = {
             "X-Requested-With": "XMLHttpRequest",
             "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -134,7 +149,6 @@ def fetch_investing():
             "timeFilter":   "timeRemain",
             "limit_from":   "0"
         }
-
         resp = requests.post(
             "https://economic-calendar.investing.com/economic-calendar/"
             "Service/getCalendarFilteredData",
@@ -143,15 +157,12 @@ def fetch_investing():
         if resp.status_code != 200:
             log(f"Investing.com HTTP {resp.status_code} — skipping")
             return []
-
         html = resp.json().get("data", "")
         if not html:
             log("Investing.com empty response — skipping")
             return []
-
         soup = BeautifulSoup(html, "html.parser")
         rows = soup.find_all("tr", {"class": lambda c: c and "js-event-item" in c})
-
         events = []
         for row in rows:
             try:
@@ -172,10 +183,8 @@ def fetch_investing():
                 })
             except Exception:
                 continue
-
-        log(f"Investing.com: {len(events)} HIGH events ✅")
+        log(f"Investing.com: {len(events)} HIGH events OK")
         return events
-
     except ImportError:
         log("Investing.com: requests/bs4 not available — skipping")
         return []
@@ -185,7 +194,6 @@ def fetch_investing():
 
 
 def fetch_news_fallback():
-    """Last resort — Brain 2's daily news file."""
     try:
         if not os.path.exists(NEWS_FALLBACK):
             return []
@@ -196,14 +204,12 @@ def fetch_news_fallback():
 
 
 def merge_news(ff_events, inv_events):
-    """Merge both sources, deduplicate by title overlap + time proximity."""
     def parse_dt(s):
         if not s:
             return None
         try:
             s = s.strip()
-            clean = s[:19]
-            dt = datetime.strptime(clean, "%Y-%m-%dT%H:%M:%S")
+            dt = datetime.strptime(s[:19], "%Y-%m-%dT%H:%M:%S")
             tz = s[19:].replace(":", "")
             if tz and tz not in ("Z", "+0000", "-0000", ""):
                 sign = 1 if "+" in s[19:] else -1
@@ -241,12 +247,11 @@ def merge_news(ff_events, inv_events):
 
 
 def fetch_all_news():
-    """Fetch from both sources, merge, fall back if both fail."""
     ff  = fetch_forexfactory()
     inv = fetch_investing()
     if ff or inv:
         merged = merge_news(ff, inv)
-        log(f"News merged: {len(merged)} total events ({len(ff)} FF + {len(inv)} Investing.com unique)")
+        log(f"News merged: {len(merged)} total ({len(ff)} FF + {len(inv)} Inv unique)")
         return merged
     log("Both live sources failed — using Brain 2 fallback file")
     return fetch_news_fallback()
@@ -258,9 +263,8 @@ def parse_event_time(s):
     if not s:
         return None
     try:
-        s = s.strip()
-        clean = s[:19]
-        dt = datetime.strptime(clean, "%Y-%m-%dT%H:%M:%S")
+        s  = s.strip()
+        dt = datetime.strptime(s[:19], "%Y-%m-%dT%H:%M:%S")
         tz = s[19:].replace(":", "")
         if tz and tz not in ("Z", "+0000", "-0000", ""):
             sign = 1 if "+" in s[19:] else -1
@@ -273,12 +277,10 @@ def parse_event_time(s):
 
 
 def check_news_block(news_data):
-    now          = datetime.utcnow()
+    now          = utcnow()
     block_window = now + timedelta(minutes=45)
     warn_window  = now + timedelta(hours=2)
-    block        = False
-    upcoming     = []
-    critical     = []
+    block, upcoming, critical = False, [], []
 
     for e in (news_data or []):
         impact = str(e.get("impact", "")).strip().lower()
@@ -290,22 +292,21 @@ def check_news_block(news_data):
         if now <= evt_dt <= warn_window:
             mins = int((evt_dt - now).total_seconds() / 60)
             entry = {
-                "title":    e.get("title", "Unknown"),
-                "country":  e.get("country", e.get("currency", "")),
+                "title": e.get("title", "Unknown"),
+                "country": e.get("country", e.get("currency", "")),
                 "time_utc": evt_dt.strftime("%H:%M UTC"),
                 "mins_away": mins,
-                "impact":   impact.upper(),
-                "source":   e.get("source", "")
+                "impact": impact.upper(),
+                "source": e.get("source", "")
             }
             upcoming.append(entry)
             if evt_dt <= block_window and impact == "high":
                 block = True
                 critical.append(entry)
-
     return block, upcoming, critical
 
 
-# ─── MARKET ANALYSIS ──────────────────────────────────────────────────────────
+# ─── MARKET DATA ──────────────────────────────────────────────────────────────
 
 def fetch_ohlcv(symbol, period, interval):
     try:
@@ -336,7 +337,7 @@ def calc_adx(high, low, close, period=14):
     pdm  = pd.Series(np.where((up > down) & (up > 0), up, 0), index=high.index)
     ndm  = pd.Series(np.where((down > up) & (down > 0), down, 0), index=low.index)
     tr   = pd.concat([(high - low), (high - close.shift(1)).abs(),
-                       (low - close.shift(1)).abs()], axis=1).max(axis=1)
+                      (low - close.shift(1)).abs()], axis=1).max(axis=1)
     atr  = tr.ewm(span=period, adjust=False).mean()
     pdi  = 100 * pdm.ewm(span=period, adjust=False).mean() / (atr + 1e-10)
     ndi  = 100 * ndm.ewm(span=period, adjust=False).mean() / (atr + 1e-10)
@@ -362,19 +363,20 @@ def get_adx_regime(symbol):
         return None, "UNKNOWN"
 
 
-def get_d1_bias(symbol):
+def get_d1_bias_and_daily(symbol):
+    """Returns (bias, d1_dataframe) so the liquidity map can reuse the data."""
+    d1 = fetch_ohlcv(symbol, "3mo", "1d")
+    if d1 is None or len(d1) < 25:
+        return "NEUTRAL", None
     try:
-        d1 = fetch_ohlcv(symbol, "3mo", "1d")
-        if d1 is None or len(d1) < 25:
-            return "NEUTRAL"
         ema   = calc_ema(d1["Close"], 20)
         close = float(d1["Close"].iloc[-1])
         e20   = float(ema.iloc[-1])
         if abs(close - e20) / e20 < 0.0003:
-            return "NEUTRAL"
-        return "BULL" if close > e20 else "BEAR"
+            return "NEUTRAL", d1
+        return ("BULL" if close > e20 else "BEAR"), d1
     except Exception:
-        return "NEUTRAL"
+        return "NEUTRAL", d1
 
 
 def get_recent_wr(pair_name, lookback=15):
@@ -412,6 +414,112 @@ def score_adjustment(wr, regime):
     return adj, (", ".join(reasons) or "conditions normal")
 
 
+# ─── LIQUIDITY MAP (NEW in v4) ────────────────────────────────────────────────
+
+def build_liquidity_map(pair_name, d1, bias):
+    """
+    Builds the per-pair liquidity map from daily data:
+      PDH/PDL, PWH/PWL, next round numbers, 20-day extremes.
+    Marks mitigation, classifies breaking point + reversal point,
+    projects a TP1->TP3 ladder in the bias direction.
+    """
+    if d1 is None or len(d1) < 10:
+        return None
+    try:
+        pip  = PIP_SIZES.get(pair_name, 0.0001)
+        step = ROUND_STEP.get(pair_name, 0.01)
+
+        price = float(d1["Close"].iloc[-1])
+        today_high = float(d1["High"].iloc[-1])
+        today_low  = float(d1["Low"].iloc[-1])
+
+        # Previous day (last COMPLETED bar)
+        pdh = float(d1["High"].iloc[-2])
+        pdl = float(d1["Low"].iloc[-2])
+
+        # Previous week via weekly resample
+        wk  = d1.resample("W", label="right", closed="right").agg(
+            {"High": "max", "Low": "min"}).dropna()
+        pwh = float(wk["High"].iloc[-2]) if len(wk) >= 2 else None
+        pwl = float(wk["Low"].iloc[-2])  if len(wk) >= 2 else None
+
+        # Current week's range so far (rough: last 5 daily bars)
+        cw = d1.iloc[-min(5, len(d1)):]
+        cur_wk_high = float(cw["High"].max())
+        cur_wk_low  = float(cw["Low"].min())
+
+        # 20-day extremes = bigger external liquidity
+        ext = d1.iloc[-min(20, len(d1)):]
+        hi20 = float(ext["High"].max())
+        lo20 = float(ext["Low"].min())
+
+        # Next round numbers
+        rn_above = math.ceil(price / step) * step
+        if rn_above <= price:
+            rn_above += step
+        rn_below = math.floor(price / step) * step
+        if rn_below >= price:
+            rn_below -= step
+
+        def lvl(name, value, mitigated):
+            if value is None:
+                return None
+            return {
+                "name": name,
+                "level": round(value, 5 if pip == 0.0001 else 3),
+                "pips": round(abs(value - price) / pip, 1),
+                "status": "mitigated" if mitigated else "unmitigated"
+            }
+
+        # Mitigation: has price already traded through it recently?
+        candidates_above = [
+            lvl("PDH", pdh, today_high >= pdh),
+            lvl("PWH", pwh, pwh is not None and cur_wk_high >= pwh),
+            lvl("RN",  rn_above, False),
+            lvl("20D_HIGH", hi20, False if hi20 > today_high else True),
+        ]
+        candidates_below = [
+            lvl("PDL", pdl, today_low <= pdl),
+            lvl("PWL", pwl, pwl is not None and cur_wk_low <= pwl),
+            lvl("RN",  rn_below, False),
+            lvl("20D_LOW", lo20, False if lo20 < today_low else True),
+        ]
+
+        above = sorted(
+            [l for l in candidates_above if l and l["level"] > price],
+            key=lambda x: x["level"])
+        below = sorted(
+            [l for l in candidates_below if l and l["level"] < price],
+            key=lambda x: -x["level"])
+
+        # Projection only when we have a directional bias
+        projection = None
+        if bias in ("BULL", "BEAR"):
+            with_bias   = above if bias == "BULL" else below
+            against     = below if bias == "BULL" else above
+            targets     = [l for l in with_bias if l["status"] == "unmitigated"]
+            # pad ladder with mitigated levels if fewer than 3 clean targets
+            ladder = (targets + [l for l in with_bias if l["status"] == "mitigated"])[:3]
+            breaking = targets[0] if targets else (with_bias[0] if with_bias else None)
+            reversal = against[0] if against else None
+            projection = {
+                "direction": bias,
+                "tp_ladder": ladder,           # TP1, TP2, TP3 candidates in order
+                "breaking_point": breaking,    # first unmitigated with-bias level
+                "reversal_point": reversal     # nearest against-bias defense level
+            }
+
+        return {
+            "price": round(price, 5 if pip == 0.0001 else 3),
+            "above": above,
+            "below": below,
+            "projection": projection
+        }
+    except Exception as e:
+        log(f"Liquidity map error {pair_name}: {e}")
+        return None
+
+
 # ─── CHANGE DETECTION + ALERTING ──────────────────────────────────────────────
 
 def load_prev():
@@ -428,7 +536,6 @@ def detect_and_alert(prev, new):
     if prev is None:
         return
 
-    # News block newly activated
     if new.get("block_all") and not prev.get("block_all"):
         critical = new.get("critical_events", [])
         lines    = ["Trades PAUSED — high-impact news incoming:\n"]
@@ -436,12 +543,10 @@ def detect_and_alert(prev, new):
             lines.append(f"  {e['impact']} | {e['country']} | {e['title']} — {e['time_utc']} ({e['mins_away']} min)")
         save_alert("NEWS_BLOCK", "NEWS BLOCK ACTIVATED — trades paused", "\n".join(lines))
 
-    # News block cleared
     if prev.get("block_all") and not new.get("block_all"):
         save_alert("NEWS_CLEAR", "News block cleared — trading resumed",
                    "All high-impact events passed. Robot accepting signals again.")
 
-    # New high-impact event warning (90 min window)
     prev_titles = {e.get("title", "") for e in prev.get("news_events_upcoming", [])}
     for e in new.get("news_events_upcoming", []):
         if (e.get("impact") == "HIGH"
@@ -449,59 +554,67 @@ def detect_and_alert(prev, new):
                 and e.get("mins_away", 999) <= 90):
             save_alert(
                 "NEWS_WARN",
-                f"⚡ HIGH IMPACT: {e['title']} in {e['mins_away']} min",
+                f"HIGH IMPACT: {e['title']} in {e['mins_away']} min",
                 f"Event:  {e['title']} ({e['country']})\n"
                 f"Time:   {e['time_utc']} ({e['mins_away']} min away)\n"
                 f"Source: {e.get('source', 'unknown')}\n"
-                f"Impact: {e['impact']}\n\n"
                 f"Brain 3 will block trades within 45 min of this event."
             )
 
-    # Pair newly blocked
     for pair, ctx in new.get("pair_context", {}).items():
         prev_ctx = prev.get("pair_context", {}).get(pair, {})
         if ctx.get("block") and not prev_ctx.get("block"):
             save_alert(
                 "PAIR_BLOCK",
                 f"{pair} BLOCKED — {ctx.get('block_reason', 'conditions unfavourable')}",
-                f"Pair:   {pair}\n"
-                f"ADX:    {ctx.get('adx_4h')} ({ctx.get('regime')})\n"
-                f"D1:     {ctx.get('bias_d1')}\n"
-                f"WR:     {ctx.get('recent_wr')}%\n"
-                f"Reason: {ctx.get('block_reason')}"
+                f"ADX: {ctx.get('adx_4h')} ({ctx.get('regime')}) | D1: {ctx.get('bias_d1')} | WR: {ctx.get('recent_wr')}%"
             )
-
-    # Pair unblocked
-    for pair, ctx in new.get("pair_context", {}).items():
-        prev_ctx = prev.get("pair_context", {}).get(pair, {})
         if not ctx.get("block") and prev_ctx.get("block"):
             save_alert("PAIR_CLEAR", f"{pair} unblocked — conditions improved",
-                       f"{pair} is now accepting signals again.")
+                       f"{pair} is accepting signals again.")
+
+        # NEW: LEVEL_APPROACH — price closing in on the breaking point
+        lm      = ctx.get("liquidity_map") or {}
+        proj    = lm.get("projection") or {}
+        bp      = proj.get("breaking_point") or {}
+        prev_lm = prev_ctx.get("liquidity_map") or {}
+        prev_bp = (prev_lm.get("projection") or {}).get("breaking_point") or {}
+        pips_now  = bp.get("pips", 9999)
+        pips_prev = prev_bp.get("pips", 9999)
+        if pips_now <= LEVEL_APPROACH_PIPS < pips_prev and bp.get("name"):
+            save_alert(
+                "LEVEL_APPROACH",
+                f"{pair} approaching breaking point {bp['name']} @ {bp['level']} ({pips_now} pips)",
+                f"Pair:   {pair}\n"
+                f"Price:  {lm.get('price')}\n"
+                f"Level:  {bp['name']} at {bp['level']} — {pips_now} pips away\n"
+                f"Bias:   {proj.get('direction')}\n"
+                f"If price breaks and CLOSES beyond this level, expect continuation\n"
+                f"toward the next target. A wick-through-and-close-back = sweep/reversal."
+            )
 
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 def build_context():
     log("Building market context...")
-    now      = datetime.utcnow()
+    now      = utcnow()
     prev_ctx = load_prev()
 
-    # News — dual source
-    news     = fetch_all_news()
+    news = fetch_all_news()
     block, upcoming, critical = check_news_block(news)
-
     if block:
-        log(f"⚠️  NEWS BLOCK: {[e['title'] for e in critical]}")
+        log(f"NEWS BLOCK: {[e['title'] for e in critical]}")
     else:
         log(f"News clear — {len(upcoming)} events upcoming (none blocking now)")
 
-    # Pair intelligence
     pair_context = {}
     for pair_name, symbol in PAIRS.items():
-        adx_val, regime     = get_adx_regime(symbol)
-        bias                = get_d1_bias(symbol)
-        wr, wins, losses    = get_recent_wr(pair_name)
-        adj, reason         = score_adjustment(wr, regime)
+        adx_val, regime  = get_adx_regime(symbol)
+        bias, d1         = get_d1_bias_and_daily(symbol)
+        wr, wins, losses = get_recent_wr(pair_name)
+        adj, reason      = score_adjustment(wr, regime)
+        liq_map          = build_liquidity_map(pair_name, d1, bias)
 
         pair_block   = (regime == "RANGING" and wr < 30)
         block_reason = f"ranging market + poor performance ({wr:.0f}% WR)" if pair_block else ""
@@ -510,10 +623,15 @@ def build_context():
             "adx_4h": adx_val, "regime": regime, "bias_d1": bias,
             "recent_wr": wr, "recent_wins": wins, "recent_losses": losses,
             "score_adjustment": adj, "reason": reason,
-            "block": pair_block, "block_reason": block_reason
+            "block": pair_block, "block_reason": block_reason,
+            "liquidity_map": liq_map
         }
-        status = "🔴 BLOCKED" if pair_block else f"🟡+{adj}" if adj else "🟢 CLEAR"
-        log(f"{pair_name}: ADX={adx_val} {regime} | D1:{bias} | WR:{wr:.0f}% | {status}")
+        status = "BLOCKED" if pair_block else f"+{adj}" if adj else "CLEAR"
+        bp_txt = ""
+        if liq_map and liq_map.get("projection") and liq_map["projection"].get("breaking_point"):
+            bp = liq_map["projection"]["breaking_point"]
+            bp_txt = f" | break: {bp['name']}@{bp['level']} ({bp['pips']}p)"
+        log(f"{pair_name}: ADX={adx_val} {regime} | D1:{bias} | WR:{wr:.0f}% | {status}{bp_txt}")
 
     context = {
         "updated":              now.isoformat(),
@@ -540,27 +658,41 @@ def build_context():
 
 
 def print_summary(ctx):
-    print("\n" + "=" * 56)
-    print("  WAVEEDGE BRAIN 3 v3 — MARKET INTELLIGENCE")
+    print("\n" + "=" * 58)
+    print("  WAVEEDGE BRAIN 3 v4 — INTELLIGENCE + LIQUIDITY MAP")
     print(f"  {ctx['updated_human']}")
-    print("=" * 56)
-    print(f"  Mode         : {ctx['system_mode']}")
-    print(f"  News Block   : {'YES ⚠️' if ctx['news_block_active'] else 'No'}")
-
+    print("=" * 58)
+    print(f"  Mode       : {ctx['system_mode']}")
+    print(f"  News Block : {'YES' if ctx['news_block_active'] else 'No'}")
     upcoming = ctx.get("news_events_upcoming", [])
     if upcoming:
         print(f"  Upcoming ({len(upcoming)}):")
-        for e in upcoming[:6]:
-            icon = "🔴" if e["impact"] == "HIGH" else "🟡"
-            src  = f"[{e.get('source','?')[:2]}]"
-            print(f"    {icon} {e['mins_away']:3}min | {e['country']:3} | {e['title'][:35]} {src}")
-
-    print("-" * 56)
+        for e in upcoming[:5]:
+            icon = "[H]" if e["impact"] == "HIGH" else "[M]"
+            print(f"    {icon} {e['mins_away']:3}min | {e['country']:3} | {e['title'][:38]}")
+    print("-" * 58)
     print("  PAIR INTELLIGENCE:")
     for pair, p in ctx["pair_context"].items():
-        status = "🔴 BLOCKED" if p["block"] else f"🟡+{p['score_adjustment']}" if p["score_adjustment"] else "🟢 CLEAR"
-        print(f"  {pair:8} | {p['regime']:12} | D1:{p['bias_d1']:4} | WR:{p['recent_wr']:4.0f}% | {status}")
-    print("=" * 56)
+        status = "BLOCKED" if p["block"] else f"+{p['score_adjustment']}" if p["score_adjustment"] else "CLEAR"
+        print(f"  {pair:8}| {p['regime']:11}| D1:{p['bias_d1']:4}| WR:{p['recent_wr']:4.0f}% | {status}")
+    print("-" * 58)
+    print("  WEEKLY PROJECTIONS (break -> targets | defense):")
+    for pair, p in ctx["pair_context"].items():
+        lm = p.get("liquidity_map")
+        if not lm or not lm.get("projection"):
+            print(f"  {pair:8}| NEUTRAL bias — no directional projection")
+            continue
+        proj   = lm["projection"]
+        ladder = proj.get("tp_ladder", [])
+        bp     = proj.get("breaking_point")
+        rp     = proj.get("reversal_point")
+        tps    = " -> ".join(f"{t['name']}@{t['level']}" for t in ladder) or "none"
+        bp_txt = f"{bp['name']}@{bp['level']} ({bp['pips']}p)" if bp else "n/a"
+        rp_txt = f"{rp['name']}@{rp['level']} ({rp['pips']}p)" if rp else "n/a"
+        print(f"  {pair:8}| {proj['direction']:4} | break: {bp_txt}")
+        print(f"          | TPs: {tps}")
+        print(f"          | defense/reversal: {rp_txt}")
+    print("=" * 58)
 
 
 if __name__ == "__main__":
