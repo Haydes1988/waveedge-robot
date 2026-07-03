@@ -198,22 +198,37 @@ def calculate_quantity(balance, risk_pct, entry_price, sl_price, pip_size):
     return quantity, risk_dollars
 
 
+def blocked(stage, reason, symbol=None, action=None):
+    """Uniform non-execution result — every early exit returns this shape
+    instead of None, so the caller always knows WHY, not just THAT."""
+    log(f"BLOCKED [{stage}]: {reason}")
+    return {
+        "status_code": 0, "executed": False,
+        "block_stage": stage, "block_reason": reason,
+        "symbol": symbol, "action": action
+    }
+
+
 def place_trade(symbol, action, strategy, risk_pct, sl_price, tp1_price, tp2_price,
                 score, intelligence_approved, intel_reason):
     try:
         market = MARKET_MAP.get(symbol)
         if not market:
-            log(f"BLOCKED: {symbol} not in approved market list")
-            return None
+            return blocked("unsupported_symbol", f"{symbol} not in approved market list", symbol, action)
 
         daily_loss, pnl_data = get_daily_loss()
         if daily_loss <= -DAILY_LOSS_LIMIT:
-            log(f"BLOCKED: Daily loss limit reached (${DAILY_LOSS_LIMIT})")
-            return None
+            # ACCOUNT-LEVEL pause only. The signal above this point was already
+            # received, scored, and logged — this stage only stops MY account
+            # from placing a real order. It does not touch signal generation,
+            # Brain 3, or any future distribution to other subscribers.
+            return blocked("daily_loss_limit",
+                           f"Daily loss limit reached (${DAILY_LOSS_LIMIT}) — "
+                           f"account paused for the rest of today, signal still logged",
+                           symbol, action)
 
         if not intelligence_approved:
-            log(f"BLOCKED by Brain3: {intel_reason}")
-            return None
+            return blocked("brain3_reject", intel_reason, symbol, action)
 
         api = GCapiClient(username=GCAPI_USER, password=GCAPI_PASS, appkey=GCAPI_KEY)
         pip = market["pip"]
@@ -222,11 +237,13 @@ def place_trade(symbol, action, strategy, risk_pct, sl_price, tp1_price, tp2_pri
 
         total_open, symbol_open = get_open_position_counts(api, market_id)
         if symbol_open >= MAX_POSITIONS_PER_SYMBOL:
-            log(f"BLOCKED: {symbol} at position limit ({symbol_open}/{MAX_POSITIONS_PER_SYMBOL})")
-            return None
+            return blocked("position_limit_symbol",
+                           f"{symbol} at position limit ({symbol_open}/{MAX_POSITIONS_PER_SYMBOL})",
+                           symbol, action)
         if total_open >= MAX_TOTAL_POSITIONS:
-            log(f"BLOCKED: Total position limit reached ({total_open}/{MAX_TOTAL_POSITIONS})")
-            return None
+            return blocked("position_limit_total",
+                           f"Total position limit reached ({total_open}/{MAX_TOTAL_POSITIONS})",
+                           symbol, action)
 
         balance     = 500.0
         entry_price = api.get_prices(market_id=market_id, num_ticks=1)
@@ -269,14 +286,17 @@ def place_trade(symbol, action, strategy, risk_pct, sl_price, tp1_price, tp2_pri
             log(f"❌ TRADE REJECTED: {symbol} Status:{status} Reason:{reason}")
 
         return {
-            "status_code": status, "symbol": symbol, "action": action,
+            "status_code": status, "executed": status == 1,
+            "symbol": symbol, "action": action,
+            "block_stage": None if status == 1 else "broker_rejected",
+            "block_reason": None if status == 1 else result.get("StatusReason", "unknown"),
             "risk_dollars": round(risk_dollars, 2), "quantity": quantity,
             "entry_price": entry_price, "sl": sl_price, "tp1": tp1_price, "tp2": tp2_price,
             "intelligence_reason": intel_reason
         }
     except Exception as e:
         log(f"TRADE ERROR: {e}")
-        return None
+        return blocked("execution_error", str(e), symbol, action)
 
 
 # ─── ROUTES ──────────────────────────────────────────────────────────────────
@@ -318,16 +338,28 @@ def webhook():
         trade_result = place_trade(symbol, action, strategy, risk_pct,
                                    sl, tp1, tp2, score, approved, reason)
 
+        # Precise status: WHY it did or didn't execute, not just yes/no.
+        # "blocked_daily_loss" = my account risk paused; signal itself was
+        # still received, scored, and recorded right here regardless.
+        if trade_result and trade_result.get("executed"):
+            precise_status = "executed"
+        elif trade_result:
+            precise_status = f"blocked_{trade_result.get('block_stage', 'unknown')}"
+        else:
+            precise_status = "blocked_unknown"
+
         trade_log = {
             "timestamp": datetime.utcnow().isoformat(),
             "strategy": strategy, "symbol": symbol, "action": action,
             "score": score, "risk_pct": risk_pct, "sl": sl, "tp1": tp1, "tp2": tp2,
             "intelligence_approved": approved, "intelligence_reason": reason,
             "confluence": confluence,
-            "status": "executed" if trade_result and trade_result.get("status_code") == 1 else "blocked"
+            "status": precise_status,
+            "block_reason": trade_result.get("block_reason") if trade_result else None
         }
         save_trade(trade_log)
-        return jsonify({"status": "ok", "approved": approved, "reason": reason}), 200
+        return jsonify({"status": "ok", "approved": approved, "reason": reason,
+                        "signal_status": precise_status}), 200
 
     except Exception as e:
         log(f"WEBHOOK ERROR: {e}")
@@ -350,7 +382,7 @@ def health():
                 "block": pc.get("block")
             }
     return jsonify({
-        "status": "WaveEdge running", "version": "2.6",
+        "status": "WaveEdge running", "version": "2.7",
         "pairs": list(MARKET_MAP.keys()),
         "daily_loss_today": daily_loss,
         "daily_loss_limit": DAILY_LOSS_LIMIT,
@@ -383,5 +415,5 @@ def positions():
 
 
 if __name__ == "__main__":
-    log("WaveEdge Webhook v2.6 (Brain3 connected) starting...")
+    log("WaveEdge Webhook v2.7 (precise block-reason logging) starting...")
     app.run(host="0.0.0.0", port=80, debug=False)
