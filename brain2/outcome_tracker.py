@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-WaveEdge Outcome Tracker v1
+WaveEdge Outcome Tracker v1.1
 Runs every 5 minutes via cron (same cadence as position_manager).
 
 PROBLEM THIS SOLVES:
@@ -183,10 +183,72 @@ def credit_win_back(risk_dollars):
         f"today's realized loss now ${pnl[today]:.2f}")
 
 
+def backfill_stale_unresolved(stale_hours=3):
+    """
+    Fixes trades that opened AND closed before this tracker ever ran a poll —
+    invisible to the snapshot-diff method below, since it only sees CHANGE
+    between two polls, not history. This resolves them for Brain 3 / Sunday
+    forensics analysis purposes ONLY.
+
+    Deliberately does NOT touch daily_pnl.json. Crediting old win-backs into
+    today's dollar counter after a manual reset would double-count — the
+    reset already discarded the original deductions, so adding credits back
+    on top would overstate today's real number, not fix it. The dollar
+    counter is correct going forward from whenever it was last reset; this
+    function only repairs the historical WIN/LOSS record.
+    """
+    trades = load_json(TRADES_FILE, [])
+    cutoff = utcnow() - timedelta(hours=stale_hours)
+    changed = False
+
+    for t in trades:
+        if t.get("status") != "executed" or t.get("result") is not None:
+            continue
+        if not t.get("entry_price"):
+            continue
+        try:
+            ts = datetime.fromisoformat(t["timestamp"])
+        except Exception:
+            continue
+        if ts > cutoff:
+            continue  # still plausibly open — leave for live detection
+
+        symbol, direction = t["symbol"], t["action"]
+        yf_sym = YF_SYMBOLS.get(symbol)
+        pip = PIP_SIZES.get(symbol, 0.0001)
+        df = fetch_5m(yf_sym) if yf_sym else None
+        if df is None:
+            continue
+
+        outcome = check_touch(df, t["timestamp"], float(t["sl"]),
+                              float(t["tp1"]), direction, pip)
+        if outcome:
+            t["result"] = outcome["result"]
+            t["outcome_pips"] = outcome["pips"]
+            t["outcome_checked"] = True
+            t["outcome_source"] = "backfill"
+            changed = True
+            log(f"BACKFILL {symbol} {direction} ({t['timestamp']}): "
+                f"{outcome['result']} ({outcome['pips']:+.1f} pips) — "
+                f"history only, daily_pnl untouched")
+        else:
+            t["result"] = "UNKNOWN"
+            t["outcome_checked"] = True
+            t["outcome_source"] = "backfill"
+            changed = True
+            log(f"BACKFILL {symbol} {direction} ({t['timestamp']}): "
+                f"no clean SL/TP touch found in available candles — marked UNKNOWN")
+
+    if changed:
+        save_json(TRADES_FILE, trades)
+
+
 def main():
+    backfill_stale_unresolved()
+
     current = get_open_positions()
     if current is None:
-        log("Could not reach GCAPI this run — skipping (will retry in 5 min)")
+        log("Could not reach GCAPI this run — skipping live-closure check (will retry in 5 min)")
         return
 
     current_keys = set()
@@ -250,3 +312,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
