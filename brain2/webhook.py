@@ -351,11 +351,17 @@ def webhook():
         trade_log = {
             "timestamp": datetime.utcnow().isoformat(),
             "strategy": strategy, "symbol": symbol, "action": action,
-            "score": score, "risk_pct": risk_pct, "sl": sl, "tp1": tp1, "tp2": tp2,
+            "score": score, "risk_pct": risk_pct,
+            "sl": trade_result.get("sl", sl) if trade_result else sl,
+            "tp1": trade_result.get("tp1", tp1) if trade_result else tp1,
+            "tp2": tp2,
+            "entry_price": trade_result.get("entry_price") if trade_result else None,
+            "risk_dollars": trade_result.get("risk_dollars") if trade_result else None,
             "intelligence_approved": approved, "intelligence_reason": reason,
             "confluence": confluence,
             "status": precise_status,
-            "block_reason": trade_result.get("block_reason") if trade_result else None
+            "block_reason": trade_result.get("block_reason") if trade_result else None,
+            "result": None, "outcome_pips": None, "outcome_checked": False
         }
         save_trade(trade_log)
         return jsonify({"status": "ok", "approved": approved, "reason": reason,
@@ -382,7 +388,7 @@ def health():
                 "block": pc.get("block")
             }
     return jsonify({
-        "status": "WaveEdge running", "version": "2.7",
+        "status": "WaveEdge running", "version": "2.8",
         "pairs": list(MARKET_MAP.keys()),
         "daily_loss_today": daily_loss,
         "daily_loss_limit": DAILY_LOSS_LIMIT,
@@ -415,5 +421,5 @@ def positions():
 
 
 if __name__ == "__main__":
-    log("WaveEdge Webhook v2.7 (precise block-reason logging) starting...")
+    log("WaveEdge Webhook v2.8 (entry price capture for outcome tracking) starting...")
     app.run(host="0.0.0.0", port=80, debug=False)
