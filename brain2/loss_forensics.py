@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-WaveEdge Loss Forensics — the Sunday Improvement Engine
+WaveEdge Loss Forensics v2 — the Sunday Improvement Engine
 Runs every Sunday 23:30 UTC (after the 23:00 backtest) via cron.
 
 WHAT IT DOES:
@@ -263,6 +263,17 @@ def main():
                 f"{k}: {wr}% WR over {n} trades "
                 f"-> candidate: pause Scalp on {k}")
 
+    for k, n, wr, pips in dow_rows:
+        if n >= 20 and wr < overall_wr - 8:
+            flags[f"day_{k}_weak"] = (
+                f"{k}: {wr}% WR over {n} trades vs {overall_wr}% overall, "
+                f"{pips:+.1f} pips -> candidate: session/day filter for {k}")
+        if n >= 20 and wr > overall_wr + 8 and pips > 0:
+            flags[f"day_{k}_strong"] = (
+                f"{k}: {wr}% WR over {n} trades vs {overall_wr}% overall, "
+                f"{pips:+.1f} pips -> candidate: no action needed, just confirms "
+                f"{k} is a strong day (informational, not a change to make)")
+
     if off_n >= 30 and at_n >= 30 and off_wr > at_wr + 8:
         flags["key_level_bonus_backwards"] = (
             f"OFF-key-level trades ({off_wr}%) beat AT-key-level ({at_wr}%) "
@@ -302,7 +313,7 @@ def main():
     # ── Report
     L = []
     L.append("=" * 58)
-    L.append("  WAVEEDGE LOSS FORENSICS — SUNDAY IMPROVEMENT ENGINE")
+    L.append("  WAVEEDGE LOSS FORENSICS v2 — SUNDAY IMPROVEMENT ENGINE")
     L.append(f"  {utcnow().strftime('%Y-%m-%d %H:%M UTC')} | source: {os.path.basename(path)}")
     L.append("=" * 58)
     L.append(f"  Trades: {total} | Overall WR: {overall_wr}% | Losses: {len(losses)}")
@@ -331,7 +342,14 @@ def main():
     for k, n, wr, pips in dow_rows:
         L.append(f"  {k:11}: {n:4} trades | {wr:5.1f}% WR | {pips:+.1f} pips")
     L.append("")
+    L.append("WR BY PAIR:")
+    for k, n, wr, pips in pair_rows:
+        L.append(f"  {k:11}: {n:4} trades | {wr:5.1f}% WR | {pips:+.1f} pips")
+    L.append("")
     L.append(f"KEY LEVEL: AT {at_wr}% ({at_n}) vs OFF {off_wr}% ({off_n})")
+    if off_n >= 30 and at_n >= 30:
+        gap = off_wr - at_wr
+        L.append(f"  (gap: {gap:+.1f} points — flags at +/-8; currently {'NOTED, sub-threshold' if abs(gap) < 8 else 'THRESHOLD MET'})")
     L.append("")
     L.append("-" * 58)
     L.append("ACTIONABLE (seen 2+ Sundays running — pick AT MOST ONE):")
