@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-WaveEdge FULL-FIDELITY Weekly Backtest v4
+WaveEdge FULL-FIDELITY Weekly Backtest v4.1
 NEW: TP MODEL COMPARISON — every signal is scored TWICE:
   A) Fixed R-multiple TP (current live logic: Scalp 1.5R, Day 2R)
   B) Zone-based TP (nearest unmitigated liquidity level in trade direction:
@@ -457,6 +457,7 @@ def run_full_strategy(pair_name, symbol, strategy_name, cfg,
             "pair": pair_name, "direction": direction.upper(),
             "score": base_score + key_score, "key_score": key_score,
             "at_key_level": key_score > 0,
+            "entry": round(entry, 5), "sl": round(sl, 5), "tp": round(tp_fixed, 5),
             "result": out_fixed["result"], "pips": out_fixed["pips"], "r": out_fixed["r"],
             "zone_used": zone_used,
             "zone_result": out_zone["result"] if out_zone else "OPEN",
@@ -500,7 +501,7 @@ def generate_report(all_results):
 
     lines = []
     lines.append("=" * 58)
-    lines.append("  WAVEEDGE FULL-FIDELITY BACKTEST REPORT v4")
+    lines.append("  WAVEEDGE FULL-FIDELITY BACKTEST REPORT v4.1")
     lines.append(f"  {(datetime.utcnow()-timedelta(days=7)).strftime('%b %d')} - {datetime.utcnow().strftime('%b %d %Y')}")
     lines.append("  NEW: Fixed-R vs Zone-based TP comparison")
     lines.append("=" * 58)
