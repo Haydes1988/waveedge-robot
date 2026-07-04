@@ -19,6 +19,8 @@ TRADING_ACC_ID  = 407829813
 
 DEFAULT_SL_PIPS        = 20
 DAILY_LOSS_LIMIT       = 25
+TOTAL_DRAWDOWN_LIMIT   = 75    # 15% of $500 capital — total realized loss = full pause
+MAX_RISK_PCT           = 1.0   # phase-1 go-live cap; raise to 1.5 only after 2 clean live weeks
 MAX_POSITIONS_PER_SYMBOL = 2
 MAX_TOTAL_POSITIONS    = 4
 
@@ -67,6 +69,17 @@ def get_daily_loss():
     except Exception:
         data = {}
     return data.get(today, 0), data
+
+
+def get_total_realized_loss():
+    """Sum across ALL days in daily_pnl.json — the account-level drawdown gauge.
+    With outcome_tracker crediting wins back, this converges on realized loss."""
+    try:
+        with open(DAILY_PNL_FILE, "r") as f:
+            data = json.load(f)
+        return round(sum(v for v in data.values() if isinstance(v, (int, float))), 2)
+    except Exception:
+        return 0
 
 
 def update_daily_loss(risk_dollars, pnl_data):
@@ -189,13 +202,17 @@ def get_open_position_counts(api, market_id):
 
 
 def calculate_quantity(balance, risk_pct, entry_price, sl_price, pip_size):
-    risk_dollars = balance * (risk_pct / 100.0)
+    intended_risk = balance * (risk_pct / 100.0)
     pip_distance = abs(entry_price - sl_price)
     if pip_distance < pip_size * 5:
         pip_distance = DEFAULT_SL_PIPS * pip_size
-    quantity = (risk_dollars / pip_distance) * pip_size * 10000
-    quantity = max(1000, min(int(quantity), 50000))
-    return quantity, risk_dollars
+    raw_qty  = (intended_risk / pip_distance) * pip_size * 10000
+    quantity = max(1000, min(int(raw_qty), 50000))
+    # Broker min size (1000) can force MORE exposure than intended on wide
+    # stops. Recompute what this quantity ACTUALLY risks so every limit
+    # downstream tracks reality, not intention.
+    actual_risk = quantity * pip_distance / (pip_size * 10000)
+    return quantity, round(actual_risk, 2), round(intended_risk, 2)
 
 
 def blocked(stage, reason, symbol=None, action=None):
@@ -215,6 +232,14 @@ def place_trade(symbol, action, strategy, risk_pct, sl_price, tp1_price, tp2_pri
         market = MARKET_MAP.get(symbol)
         if not market:
             return blocked("unsupported_symbol", f"{symbol} not in approved market list", symbol, action)
+
+        total_realized = get_total_realized_loss()
+        if total_realized <= -TOTAL_DRAWDOWN_LIMIT:
+            return blocked("drawdown_stop",
+                           f"TOTAL realized loss ${abs(total_realized):.2f} has hit the "
+                           f"${TOTAL_DRAWDOWN_LIMIT} (15%) drawdown stop — ROBOT FULLY PAUSED. "
+                           f"Manual review required before any reset.",
+                           symbol, action)
 
         daily_loss, pnl_data = get_daily_loss()
         if daily_loss <= -DAILY_LOSS_LIMIT:
@@ -259,7 +284,15 @@ def place_trade(symbol, action, strategy, risk_pct, sl_price, tp1_price, tp2_pri
                 tp2_price = round(entry_price - DEFAULT_SL_PIPS * pip * 4, 5)
             log(f"DEFAULT SL APPLIED: {DEFAULT_SL_PIPS} pips")
 
-        quantity, risk_dollars = calculate_quantity(balance, risk_pct, entry_price, sl_price, pip)
+        quantity, actual_risk, intended_risk = calculate_quantity(balance, risk_pct, entry_price, sl_price, pip)
+        if actual_risk > intended_risk * 2:
+            return blocked("stop_too_wide_for_min_size",
+                           f"broker minimum size would risk ${actual_risk:.2f} vs intended "
+                           f"${intended_risk:.2f} — trade skipped to protect risk discipline",
+                           symbol, action)
+        if actual_risk > intended_risk * 1.05:
+            log(f"RISK NOTE: min-size clamp raised {symbol} risk ${intended_risk:.2f} -> ${actual_risk:.2f}")
+        risk_dollars = actual_risk
 
         kwargs = {
             "quantity": quantity, "offer_price": entry_price, "direction": action,
@@ -315,6 +348,9 @@ def webhook():
         symbol   = data.get("sym", "")
         score    = int(data.get("score", 0))
         risk_pct = float(data.get("risk", 1.5))
+        if risk_pct > MAX_RISK_PCT:
+            log(f"RISK CAP: signal requested {risk_pct}% — capped to {MAX_RISK_PCT}% (phase-1 rule)")
+            risk_pct = MAX_RISK_PCT
         sl       = float(data.get("sl", 0))
         tp1      = float(data.get("tp1", 0))
         tp2      = float(data.get("tp2", 0))
@@ -388,10 +424,13 @@ def health():
                 "block": pc.get("block")
             }
     return jsonify({
-        "status": "WaveEdge running", "version": "2.8",
+        "status": "WaveEdge running", "version": "2.9",
         "pairs": list(MARKET_MAP.keys()),
         "daily_loss_today": daily_loss,
         "daily_loss_limit": DAILY_LOSS_LIMIT,
+        "total_realized_loss": get_total_realized_loss(),
+        "drawdown_stop_at": -TOTAL_DRAWDOWN_LIMIT,
+        "max_risk_pct": MAX_RISK_PCT,
         "max_positions_per_symbol": MAX_POSITIONS_PER_SYMBOL,
         "max_total_positions": MAX_TOTAL_POSITIONS,
         "brain3_status": brain3_status,
@@ -421,5 +460,5 @@ def positions():
 
 
 if __name__ == "__main__":
-    log("WaveEdge Webhook v2.8 (entry price capture for outcome tracking) starting...")
+    log("WaveEdge Webhook v2.9 (drawdown stop + risk cap + honest sizing) starting...")
     app.run(host="0.0.0.0", port=80, debug=False)
