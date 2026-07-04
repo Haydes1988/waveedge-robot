@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-WaveEdge Outcome Tracker v1.1
+WaveEdge Outcome Tracker v1.2
 Runs every 5 minutes via cron (same cadence as position_manager).
 
 PROBLEM THIS SOLVES:
@@ -131,8 +131,8 @@ def fetch_5m(symbol_yf):
         return None
 
 
-def check_touch(df, signal_time, sl, tp1, direction, pip_size):
-    """Did price touch SL or TP1 first, between signal_time and now?"""
+def check_touch(df, signal_time, entry, sl, tp1, direction, pip_size):
+    """Did price touch SL or TP1 first after signal_time? Pips vs ENTRY price."""
     try:
         import pandas as pd
         start = pd.Timestamp(signal_time)
@@ -142,14 +142,14 @@ def check_touch(df, signal_time, sl, tp1, direction, pip_size):
         for _, c in window.iterrows():
             if direction == "buy":
                 if float(c["Low"]) <= sl:
-                    return {"result": "LOSS", "pips": round((sl - float(c["Open"])) / pip_size, 1)}
+                    return {"result": "LOSS", "pips": round((sl - entry) / pip_size, 1)}
                 if float(c["High"]) >= tp1:
-                    return {"result": "WIN", "pips": round((tp1 - float(c["Open"])) / pip_size, 1)}
+                    return {"result": "WIN", "pips": round((tp1 - entry) / pip_size, 1)}
             else:
                 if float(c["High"]) >= sl:
-                    return {"result": "LOSS", "pips": round((float(c["Open"]) - sl) / pip_size, 1)}
+                    return {"result": "LOSS", "pips": round((entry - sl) / pip_size, 1)}
                 if float(c["Low"]) <= tp1:
-                    return {"result": "WIN", "pips": round((float(c["Open"]) - tp1) / pip_size, 1)}
+                    return {"result": "WIN", "pips": round((entry - tp1) / pip_size, 1)}
         return None  # still open / hasn't resolved within available data
     except Exception as e:
         log(f"Touch-check error: {e}")
@@ -220,8 +220,8 @@ def backfill_stale_unresolved(stale_hours=3):
         if df is None:
             continue
 
-        outcome = check_touch(df, t["timestamp"], float(t["sl"]),
-                              float(t["tp1"]), direction, pip)
+        outcome = check_touch(df, t["timestamp"], float(t["entry_price"]),
+                              float(t["sl"]), float(t["tp1"]), direction, pip)
         if outcome:
             t["result"] = outcome["result"]
             t["outcome_pips"] = outcome["pips"]
@@ -251,23 +251,36 @@ def main():
         log("Could not reach GCAPI this run — skipping live-closure check (will retry in 5 min)")
         return
 
-    current_keys = set()
+    current_counts = {}
     for p in current:
         mid = extract_field(p, ["MarketId", "marketId"])
         direction = str(extract_field(p, ["Direction", "TradeDirection", "direction"], "")).lower()
         symbol = MARKET_MAP.get(mid)
         if symbol:
-            current_keys.add((symbol, direction))
+            key = f"{symbol}|{direction}"
+            current_counts[key] = current_counts.get(key, 0) + 1
 
-    previous = load_json(SNAPSHOT_FILE, {"keys": []})
-    previous_keys = set(tuple(k) for k in previous.get("keys", []))
+    previous = load_json(SNAPSHOT_FILE, {"counts": {}})
+    prev_counts = previous.get("counts", {})
+    # Back-compat: old snapshot format used {"keys": [...]} — treat each as count 1
+    if not prev_counts and previous.get("keys"):
+        for k in previous["keys"]:
+            key = f"{k[0]}|{k[1]}"
+            prev_counts[key] = prev_counts.get(key, 0) + 1
 
-    closed = previous_keys - current_keys
-    save_json(SNAPSHOT_FILE, {"keys": [list(k) for k in current_keys],
+    save_json(SNAPSHOT_FILE, {"counts": current_counts,
                               "updated": utcnow().isoformat()})
 
+    # One closure event per COUNT decrement — catches 1-of-2 closures
+    closed = []
+    for key, pn in prev_counts.items():
+        cn = current_counts.get(key, 0)
+        for _ in range(max(0, pn - cn)):
+            sym, direc = key.split("|", 1)
+            closed.append((sym, direc))
+
     if not closed:
-        log(f"No closures this run — {len(current_keys)} position(s) still open")
+        log(f"No closures this run — {sum(current_counts.values())} position(s) still open")
         return
 
     trades = load_json(TRADES_FILE, [])
@@ -286,8 +299,8 @@ def main():
             log(f"{symbol} {direction}: closed, but no price data to determine outcome")
             continue
 
-        outcome = check_touch(df, trade["timestamp"], float(trade["sl"]),
-                              float(trade["tp1"]), direction, pip)
+        outcome = check_touch(df, trade["timestamp"], float(trade["entry_price"]),
+                              float(trade["sl"]), float(trade["tp1"]), direction, pip)
         if not outcome:
             log(f"{symbol} {direction}: closed but SL/TP touch not found in available candles — "
                 f"marking result UNKNOWN rather than guessing")
@@ -312,4 +325,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
