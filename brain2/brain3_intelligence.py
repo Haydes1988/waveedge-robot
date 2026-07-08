@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-WaveEdge Brain 3 v5 — Market Intelligence Hub + Liquidity Map + Trend Engine
+WaveEdge Brain 3 v6 — Market Intelligence Hub + Liquidity Map + Trend Engine
 Runs every 15 minutes via cron.
 NEW in v5:
   - Multi-timeframe trend engine: H1 / H4 / D1 trend per pair (UP/DOWN/SIDEWAYS)
@@ -27,18 +27,29 @@ NEWS_FALLBACK = "/root/waveedge/data/news_calendar.json"
 PAIRS = {
     "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "USDJPY=X",
     "AUDUSD": "AUDUSD=X", "USDCAD": "USDCAD=X", "USDCHF": "USDCHF=X",
-    "NZDUSD": "NZDUSD=X"
+    "NZDUSD": "NZDUSD=X",
+    "XAUUSD": "GC=F"   # NEW: gold, tracked for trend visibility only.
+                       # NOT tradeable — webhook has no XAUUSD in its
+                       # MARKET_MAP and will keep blocking any gold order
+                       # regardless of what Brain 3 reports here. This
+                       # gives you the same trend picture for gold that
+                       # the FX pairs get, nothing more.
 }
 
 PIP_SIZES = {
     "EURUSD": 0.0001, "GBPUSD": 0.0001, "USDJPY": 0.01,
     "AUDUSD": 0.0001, "USDCAD": 0.0001, "USDCHF": 0.0001,
-    "NZDUSD": 0.0001
+    "NZDUSD": 0.0001,
+    "XAUUSD": 0.01   # $0.01 tick. Distances shown as "pips" for gold are
+                     # informational estimates, not a validated convention
+                     # like the FX pairs — flagged, not fixed, since gold
+                     # can't execute anyway.
 }
 
 ROUND_STEP = {
     "EURUSD": 0.01, "GBPUSD": 0.01, "USDJPY": 1.0,
-    "AUDUSD": 0.01, "USDCAD": 0.01, "USDCHF": 0.01, "NZDUSD": 0.01
+    "AUDUSD": 0.01, "USDCAD": 0.01, "USDCHF": 0.01, "NZDUSD": 0.01,
+    "XAUUSD": 25.0   # gold round levels cluster at $25/$50/$100, not cents
 }
 
 LEVEL_APPROACH_PIPS = 15
@@ -704,7 +715,7 @@ def build_context():
 
 def print_summary(ctx):
     print("\n" + "=" * 58)
-    print("  WAVEEDGE BRAIN 3 v5 — INTELLIGENCE + TRENDS + LIQUIDITY")
+    print("  WAVEEDGE BRAIN 3 v6 — INTELLIGENCE + TRENDS + LIQUIDITY (+ GOLD)")
     print(f"  {ctx['updated_human']}")
     print("=" * 58)
     print(f"  Mode       : {ctx['system_mode']}")
