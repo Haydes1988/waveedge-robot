@@ -138,9 +138,33 @@ def intelligence_check(symbol, strategy, score, action, context):
     elif d1_bias == "BEAR" and action == "buy":
         log(f"BRAIN3 WARNING: {symbol} BUY signal but D1 bias is BEAR — reduced confidence")
 
+    # NEW: multi-timeframe trend alignment — this is Brain 3 v5's real trend
+    # engine (H1/H4/D1), computed every 15 min but never consulted before now.
+    # CROSS-TREND / SIDEWAYS = no clear multi-timeframe agreement in either
+    # direction. A signal fighting three misaligned timeframes gets a stiffer
+    # score requirement rather than an outright block — Day's D1 gate alone
+    # already proved too twitchy to trust as a hard veto on its own.
+    trend_state  = pair_ctx.get("trend_state", "")
+    trend_adj    = 0
+    trend_note   = ""
+    if trend_state:
+        against_trend = (
+            (action == "buy"  and "DOWNTREND" in trend_state) or
+            (action == "sell" and "UPTREND"   in trend_state)
+        )
+        cross_trend = ("CROSS" in trend_state) or ("SIDEWAYS" in trend_state)
+        if against_trend:
+            trend_adj  = 3
+            trend_note = f"AGAINST multi-TF trend ({trend_state})"
+        elif cross_trend:
+            trend_adj  = 1
+            trend_note = f"no clear multi-TF trend ({trend_state})"
+        elif "ALIGNED" in trend_state:
+            trend_note = f"WITH aligned trend ({trend_state})"
+
     # Adjusted minimum score
     base_min  = BASE_MIN_SCORES.get(strategy, 5)
-    adj       = pair_ctx.get("score_adjustment", 0)
+    adj       = pair_ctx.get("score_adjustment", 0) + trend_adj
     final_min = base_min + adj
     regime    = pair_ctx.get("regime", "UNKNOWN")
     wr        = pair_ctx.get("recent_wr", 50)
@@ -149,7 +173,8 @@ def intelligence_check(symbol, strategy, score, action, context):
         return False, (f"SCORE TOO LOW: {score} < {final_min} "
                        f"(base {base_min} + adj {adj} for {regime}, WR={wr:.0f}%)"), final_min
 
-    reason = f"Brain3 APPROVED: score {score} >= {final_min} | {regime} | D1:{d1_bias} | WR:{wr:.0f}%"
+    trend_txt = f" | trend:{trend_note}" if trend_note else ""
+    reason = f"Brain3 APPROVED: score {score} >= {final_min} | {regime} | D1:{d1_bias} | WR:{wr:.0f}%{trend_txt}"
     return True, reason, final_min
 
 
@@ -208,16 +233,11 @@ def calculate_quantity(balance, risk_pct, entry_price, sl_price, pip_size):
         pip_distance = DEFAULT_SL_PIPS * pip_size
     raw_qty  = (intended_risk / pip_distance) * pip_size * 10000
     quantity = max(1000, min(int(raw_qty), 50000))
-    # Broker min size (1000) can force MORE exposure than intended on wide
-    # stops. Recompute what this quantity ACTUALLY risks so every limit
-    # downstream tracks reality, not intention.
     actual_risk = quantity * pip_distance / (pip_size * 10000)
     return quantity, round(actual_risk, 2), round(intended_risk, 2)
 
 
 def blocked(stage, reason, symbol=None, action=None):
-    """Uniform non-execution result — every early exit returns this shape
-    instead of None, so the caller always knows WHY, not just THAT."""
     log(f"BLOCKED [{stage}]: {reason}")
     return {
         "status_code": 0, "executed": False,
@@ -243,10 +263,6 @@ def place_trade(symbol, action, strategy, risk_pct, sl_price, tp1_price, tp2_pri
 
         daily_loss, pnl_data = get_daily_loss()
         if daily_loss <= -DAILY_LOSS_LIMIT:
-            # ACCOUNT-LEVEL pause only. The signal above this point was already
-            # received, scored, and logged — this stage only stops MY account
-            # from placing a real order. It does not touch signal generation,
-            # Brain 3, or any future distribution to other subscribers.
             return blocked("daily_loss_limit",
                            f"Daily loss limit reached (${DAILY_LOSS_LIMIT}) — "
                            f"account paused for the rest of today, signal still logged",
@@ -374,9 +390,6 @@ def webhook():
         trade_result = place_trade(symbol, action, strategy, risk_pct,
                                    sl, tp1, tp2, score, approved, reason)
 
-        # Precise status: WHY it did or didn't execute, not just yes/no.
-        # "blocked_daily_loss" = my account risk paused; signal itself was
-        # still received, scored, and recorded right here regardless.
         if trade_result and trade_result.get("executed"):
             precise_status = "executed"
         elif trade_result:
@@ -424,7 +437,7 @@ def health():
                 "block": pc.get("block")
             }
     return jsonify({
-        "status": "WaveEdge running", "version": "2.9",
+        "status": "WaveEdge running", "version": "3.0",
         "pairs": list(MARKET_MAP.keys()),
         "daily_loss_today": daily_loss,
         "daily_loss_limit": DAILY_LOSS_LIMIT,
@@ -460,5 +473,5 @@ def positions():
 
 
 if __name__ == "__main__":
-    log("WaveEdge Webhook v2.9 (drawdown stop + risk cap + honest sizing) starting...")
+    log("WaveEdge Webhook v3.0 (multi-timeframe trend actually wired in) starting...")
     app.run(host="0.0.0.0", port=80, debug=False)
