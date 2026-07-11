@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-WaveEdge FULL-FIDELITY Weekly Backtest v4.1
+WaveEdge FULL-FIDELITY Weekly Backtest v4.2
 NEW: TP MODEL COMPARISON — every signal is scored TWICE:
   A) Fixed R-multiple TP (current live logic: Scalp 1.5R, Day 2R)
   B) Zone-based TP (nearest unmitigated liquidity level in trade direction:
@@ -20,6 +20,13 @@ STRATEGIES = {
     "Scalp": {"exec_period": "7d", "exec_interval": "5m",  "atr_mult": 1.2, "tp_r": 1.5, "min_score": 5, "wt_th": 53, "gate1_mode": "ema"},
     "Day":   {"exec_period": "7d", "exec_interval": "15m", "atr_mult": 1.5, "tp_r": 2.0, "min_score": 7, "wt_th": 53, "gate1_mode": "ob"},
 }
+
+# NEW: stop-width comparison — forensics flagged "52% of losses reached TP
+# after stopping out" for 2 straight weeks (Scalp specifically: 92 of 106
+# tight-stop losses). This tests ONE notch wider, same R:R ratio, on the
+# exact same entries/direction — nothing else changes. Live logic untouched
+# until this shows real evidence either way.
+WIDE_STOP_BUMP = 0.1
 
 PAIRS = {
     "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "USDJPY=X",
@@ -452,6 +459,16 @@ def run_full_strategy(pair_name, symbol, strategy_name, cfg,
             out_zone  = out_fixed   # no valid zone target — same as fixed
             zone_used = False
 
+        # C) NEW: one-notch-wider stop, same R:R ratio, same entry/direction
+        wide_mult = cfg["atr_mult"] + WIDE_STOP_BUMP
+        if direction == "buy":
+            wide_sl = entry - a * wide_mult
+        else:
+            wide_sl = entry + a * wide_mult
+        wide_risk = abs(entry - wide_sl)
+        wide_tp = entry + wide_risk * cfg["tp_r"] if direction == "buy" else entry - wide_risk * cfg["tp_r"]
+        out_wide = check_outcome(merged, i, entry, wide_sl, wide_tp, direction, pip_size)
+
         results.append({
             "time": str(row.name)[:16], "strategy": strategy_name,
             "pair": pair_name, "direction": direction.upper(),
@@ -462,7 +479,10 @@ def run_full_strategy(pair_name, symbol, strategy_name, cfg,
             "zone_used": zone_used,
             "zone_result": out_zone["result"] if out_zone else "OPEN",
             "zone_pips":   out_zone["pips"]   if out_zone else 0.0,
-            "zone_r":      out_zone["r"]      if out_zone else 0.0
+            "zone_r":      out_zone["r"]      if out_zone else 0.0,
+            "wide_result": out_wide["result"] if out_wide else "OPEN",
+            "wide_pips":   out_wide["pips"]   if out_wide else 0.0,
+            "wide_r":      out_wide["r"]      if out_wide else 0.0
         })
 
     return results
@@ -501,7 +521,7 @@ def generate_report(all_results):
 
     lines = []
     lines.append("=" * 58)
-    lines.append("  WAVEEDGE FULL-FIDELITY BACKTEST REPORT v4.1")
+    lines.append("  WAVEEDGE FULL-FIDELITY BACKTEST REPORT v4.2")
     lines.append(f"  {(datetime.utcnow()-timedelta(days=7)).strftime('%b %d')} - {datetime.utcnow().strftime('%b %d %Y')}")
     lines.append("  NEW: Fixed-R vs Zone-based TP comparison")
     lines.append("=" * 58)
@@ -525,6 +545,25 @@ def generate_report(all_results):
             lines.append("  VERDICT : No meaningful edge either way — keep fixed-R (simpler)")
     else:
         lines.append("  No trades had a valid zone target this week.")
+    wide_trades = [r for r in all_results if r['wide_result'] in ('WIN', 'LOSS')]
+    if wide_trades:
+        ww   = [r for r in wide_trades if r['wide_result'] == 'WIN']
+        w_wr = len(ww) / len(wide_trades) * 100
+        w_pips = sum(r['wide_pips'] for r in wide_trades)
+        w_ar = sum(r['wide_r'] for r in wide_trades) / len(wide_trades)
+        cur_wr = len(wins) / total * 100
+        cur_ar = sum(r['r'] for r in all_results) / total
+        lines.append("")
+        lines.append("-" * 58)
+        lines.append(f"STOP-WIDTH TEST (current +{WIDE_STOP_BUMP:.1f} ATR mult, same R:R):")
+        lines.append(f"  CURRENT : {cur_wr:.0f}% WR | {tp:+.1f} pips | {cur_ar:+.2f} avg R")
+        lines.append(f"  WIDER   : {w_wr:.0f}% WR | {w_pips:+.1f} pips | {w_ar:+.2f} avg R")
+        if w_ar > cur_ar + 0.05:
+            lines.append("  VERDICT : WIDER stop shows a real edge this week")
+        elif cur_ar > w_ar + 0.05:
+            lines.append("  VERDICT : CURRENT stop still better — wider does not help")
+        else:
+            lines.append("  VERDICT : Negligible difference this week")
     lines.append("")
     lines.append("-" * 58)
     lines.append("KEY LEVEL ANALYSIS:")
