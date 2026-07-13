@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-WaveEdge FULL-FIDELITY Weekly Backtest v4.2
-NEW: TP MODEL COMPARISON — every signal is scored TWICE:
-  A) Fixed R-multiple TP (current live logic: Scalp 1.5R, Day 2R)
-  B) Zone-based TP (nearest unmitigated liquidity level in trade direction:
-     PDH/PDL, PWH/PWL, round number — must be >= 0.8R away, else next level)
-Retains v3.1: key-level scoring (tight buffers), JPY pip fix, no look-ahead.
+WaveEdge FULL-FIDELITY Weekly Backtest v5.0
+
+Primary model: one setup -> three independent positions at a shared entry/SL,
+with 40/35/25 risk weights and progressive TP1/TP2/TP3 objectives.
+Also compares the middle fixed-R target with a validated liquidity-zone target
+and tests a one-notch-wider shared stop. Uses only historically closed D1/H4/
+M30 context, preserves unresolved races, and treats Fibonacci as bonus points.
 """
 
 import json
@@ -13,13 +14,26 @@ import math
 import os
 from datetime import datetime, timedelta
 
-LOG_FILE   = "/root/waveedge/logs/backtest_full.log"
-REPORT_DIR = "/root/waveedge/reports"
+LOG_FILE   = os.getenv("WAVEEDGE_FULL_BACKTEST_LOG", "/root/waveedge/logs/backtest_full.log")
+REPORT_DIR = os.getenv("WAVEEDGE_REPORT_DIR", "/root/waveedge/reports")
 
 STRATEGIES = {
-    "Scalp": {"exec_period": "7d", "exec_interval": "5m",  "atr_mult": 1.2, "tp_r": 1.5, "min_score": 5, "wt_th": 53, "gate1_mode": "ema"},
-    "Day":   {"exec_period": "7d", "exec_interval": "15m", "atr_mult": 1.5, "tp_r": 2.0, "min_score": 7, "wt_th": 53, "gate1_mode": "ob"},
+    "Scalp": {"exec_period": "7d", "exec_interval": "5m", "atr_mult": 1.2,
+              "min_score": 7, "wt_th": 53, "gate1_mode": "ema", "lookahead": 120},
+    "Day":   {"exec_period": "7d", "exec_interval": "15m", "atr_mult": 1.5,
+              "min_score": 7, "wt_th": 53, "gate1_mode": "ob", "lookahead": 96},
 }
+
+# One approved setup is one coordinated race. The account-level risk is split
+# across three broker positions; it is never multiplied by three.
+RISK_WEIGHTS = (0.40, 0.35, 0.25)
+FALLBACK_TP_RS = (1.0, 2.0, 3.5)
+
+# Fibonacci is proven useful as confluence, but harmful as an exact-moment
+# blocker. Keep both switches false unless a future two-week test proves otherwise.
+REQUIRE_FIB_FOR_TREND = False
+REQUIRE_FIB_FOR_REVERSAL = False
+COOLDOWN_BARS = 5
 
 # NEW: stop-width comparison — forensics flagged "52% of losses reached TP
 # after stopping out" for 2 straight weeks (Scalp specifically: 92 of 106
@@ -144,13 +158,17 @@ def find_pivot(series, left=10, right=10, mode='high'):
     return series.where(series == extreme)
 
 
-def eqh_eql_columns(df, tol=0.0010):
+def eqh_eql_columns(df, tol):
     ph_visible = find_pivot(df['High'], 10, 10, 'high').shift(10)
     pl_visible = find_pivot(df['Low'],  10, 10, 'low').shift(10)
-    last_ph1 = ph_visible.dropna().reindex(df.index).ffill()
-    last_ph2 = ph_visible.shift(1).dropna().reindex(df.index).ffill()
-    last_pl1 = pl_visible.dropna().reindex(df.index).ffill()
-    last_pl2 = pl_visible.shift(1).dropna().reindex(df.index).ffill()
+    # Compare two distinct pivot EVENTS. Shifting the sparse series by one bar
+    # compares a pivot with itself and creates false EQH/EQL detections.
+    ph_events = ph_visible.dropna()
+    pl_events = pl_visible.dropna()
+    last_ph1 = ph_events.reindex(df.index).ffill()
+    last_ph2 = ph_events.shift(1).reindex(df.index).ffill()
+    last_pl1 = pl_events.reindex(df.index).ffill()
+    last_pl2 = pl_events.shift(1).reindex(df.index).ffill()
     eqh_det = last_ph1.notna() & last_ph2.notna() & ((last_ph1 - last_ph2).abs() <= tol)
     eql_det = last_pl1.notna() & last_pl2.notna() & ((last_pl1 - last_pl2).abs() <= tol)
     eqh_swept = eqh_det & (df['High'] > last_ph1) & (df['Close'] < last_ph1)
@@ -280,6 +298,57 @@ def check_outcome(df, idx, entry, sl, tp1, direction, pip_size=0.0001, lookahead
     return None
 
 
+def check_race_outcome(df, idx, entry, sl, targets, direction, pip_size, lookahead):
+    """Resolve the three independent positions with a conservative bar model.
+
+    If SL and a TP appear inside the same OHLC bar, SL wins because intrabar
+    ordering is unknowable. Unresolved legs remain OPEN instead of disappearing
+    from the dataset.
+    """
+    risk = abs(entry - sl)
+    if risk < pip_size * 0.5:
+        return None
+    legs = [{"position": i + 1, "tp": float(tp), "status": "OPEN", "r": None,
+             "pips": None} for i, tp in enumerate(targets)]
+    end = min(idx + lookahead + 1, len(df))
+    for j in range(idx + 1, end):
+        bar = df.iloc[j]
+        open_legs = [leg for leg in legs if leg["status"] == "OPEN"]
+        if not open_legs:
+            break
+        sl_hit = (float(bar["Low"]) <= sl) if direction == "buy" else (float(bar["High"]) >= sl)
+        if sl_hit:
+            for leg in open_legs:
+                leg.update(status="LOSS", r=-1.0,
+                           pips=round(-risk / pip_size, 1), exit_bar=j)
+            break
+        for leg in open_legs:
+            hit = (float(bar["High"]) >= leg["tp"]) if direction == "buy" else (float(bar["Low"]) <= leg["tp"])
+            if hit:
+                reward = abs(leg["tp"] - entry)
+                leg.update(status="WIN", r=round(reward / risk, 3),
+                           pips=round(reward / pip_size, 1), exit_bar=j)
+
+    weighted_r = sum((leg["r"] or 0.0) * weight for leg, weight in zip(legs, RISK_WEIGHTS))
+    weighted_pips = sum((leg["pips"] or 0.0) * weight for leg, weight in zip(legs, RISK_WEIGHTS))
+    fully_closed = all(leg["status"] != "OPEN" for leg in legs)
+    if not fully_closed:
+        result = "OPEN"
+    elif weighted_r > 1e-9:
+        result = "WIN"
+    elif weighted_r < -1e-9:
+        result = "LOSS"
+    else:
+        result = "BREAKEVEN"
+    return {
+        "result": result,
+        "r": round(weighted_r, 3),
+        "pips": round(weighted_pips, 1),
+        "legs": legs,
+        "fully_closed": fully_closed,
+    }
+
+
 # ─── CONTEXT BUILDERS ────────────────────────────────────────────────────────
 
 def build_d1_context(symbol):
@@ -290,14 +359,16 @@ def build_d1_context(symbol):
     d1['ema20'] = calc_ema(d1['Close'], 20)
     d1['gate0_bull'] = d1['Close'] > d1['ema20']
     d1['gate0_bear'] = d1['Close'] < d1['ema20']
-    return d1[['gate0_bull', 'gate0_bear']]
+    # A value stamped on Monday may only use Sunday's completed daily candle.
+    return d1[['gate0_bull', 'gate0_bear']].shift(1).dropna()
 
 
 def build_h4_context(symbol):
     h1 = fetch(symbol, "60d", "1h")
     if h1 is None or len(h1) < 60:
         return None
-    h4 = h1.resample('4h', label='right', closed='right').agg(
+    # H1 timestamps mark bar OPEN. [00:00, 04:00) becomes available at 04:00.
+    h4 = h1.resample('4h', label='right', closed='left').agg(
         {'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last'}
     ).dropna()
     if len(h4) < 55:
@@ -325,6 +396,8 @@ def build_m30_context(symbol):
         return None
     m30 = m30.copy()
     m30['mid30'] = (m30['High'] + m30['Low']) / 2
+    # Yahoo stamps M30 bars at their open; expose the completed value at close.
+    m30.index = m30.index + __import__('pandas').Timedelta(minutes=30)
     return m30[['mid30']]
 
 
@@ -355,12 +428,21 @@ def run_full_strategy(pair_name, symbol, strategy_name, cfg,
     merged = merge_asof_safe(merged, h4_ctx, "_h4")
     merged = merge_asof_safe(merged, m30_ctx, "_m30")
 
+    h4_bull = (merged['h4_close'] > merged['ema20']) | merged['fvg_bull']
+    h4_bear = (merged['h4_close'] < merged['ema20']) | merged['fvg_bear']
     if cfg["gate1_mode"] == "ema":
-        gate1_bull = merged['gate0_bull'] & ((merged['h4_close'] > merged['ema20']) | merged['fvg_bull'])
-        gate1_bear = merged['gate0_bear'] & ((merged['h4_close'] < merged['ema20']) | merged['fvg_bear'])
+        gate1_bull = h4_bull
+        gate1_bear = h4_bear
     else:
-        gate1_bull = merged['gate0_bull'] & (merged['ob_bull'] | merged['fvg_bull'])
-        gate1_bear = merged['gate0_bear'] & (merged['ob_bear'] | merged['fvg_bear'])
+        gate1_bull = (merged['ob_bull'] | merged['fvg_bull']) & h4_bull
+        gate1_bear = (merged['ob_bear'] | merged['fvg_bear']) & h4_bear
+
+    # D1 + H4 are the historical direction authority. H1/execution data may
+    # time the entry, but cannot override a fully aligned higher-timeframe trend.
+    buy_only = merged['gate0_bull'] & h4_bull & ~h4_bear
+    sell_only = merged['gate0_bear'] & h4_bear & ~h4_bull
+    buy_allowed = ~sell_only
+    sell_allowed = ~buy_only
 
     fib_range    = merged['swing_high'] - merged['swing_low']
     fib_buffer   = pip_size * 30
@@ -387,7 +469,7 @@ def run_full_strategy(pair_name, symbol, strategy_name, cfg,
     wt_os = wt1 <= -cfg["wt_th"]
     wt_ob = wt1 >= cfg["wt_th"]
 
-    eqh_swept, eql_swept = eqh_eql_columns(merged)
+    eqh_swept, eql_swept = eqh_eql_columns(merged, tol=pip_size * 5)
     atr = calc_atr(merged['High'], merged['Low'], merged['Close'])
     market_trending = merged['adx'] >= 20
 
@@ -395,21 +477,27 @@ def run_full_strategy(pair_name, symbol, strategy_name, cfg,
                   price_in_bull_fib.astype(int) * 2 + gate2_bull.astype(int) * 1 +
                   wt_xbull.astype(int) * 1 + wt_os.astype(int) * 1 +
                   rev_bull.astype(int) * 2 + merged['fvg_bull'].astype(int) * 1 +
-                  (atr > 0).astype(int) * 1 + eql_swept.astype(int) * 2)
+                  (atr > 0).astype(int) * 1 + market_trending.astype(int) * 1 +
+                  eql_swept.astype(int) * 2)
 
     score_bear = (merged['gate0_bear'].astype(int) * 2 + gate1_bear.astype(int) * 2 +
                   price_in_bear_fib.astype(int) * 2 + gate2_bear.astype(int) * 1 +
                   wt_xbear.astype(int) * 1 + wt_ob.astype(int) * 1 +
                   rev_bear.astype(int) * 2 + merged['fvg_bear'].astype(int) * 1 +
-                  (atr > 0).astype(int) * 1 + eqh_swept.astype(int) * 2)
+                  (atr > 0).astype(int) * 1 + market_trending.astype(int) * 1 +
+                  eqh_swept.astype(int) * 2)
 
-    long_signal  = gate2_bull & rev_bull & (score_bull >= cfg["min_score"]) & market_trending
-    short_signal = gate2_bear & rev_bear & (score_bear >= cfg["min_score"]) & market_trending
+    fib_long_ok = price_in_bull_fib if (REQUIRE_FIB_FOR_TREND or REQUIRE_FIB_FOR_REVERSAL) else True
+    fib_short_ok = price_in_bear_fib if (REQUIRE_FIB_FOR_TREND or REQUIRE_FIB_FOR_REVERSAL) else True
+    long_candidate = gate2_bull & rev_bull & buy_allowed & fib_long_ok
+    short_candidate = gate2_bear & rev_bear & sell_allowed & fib_short_ok
 
     cutoff = merged.index.max() - timedelta(days=7)
     n = len(merged)
 
-    for i in range(60, n - 45):
+    lookahead = int(cfg.get("lookahead", 96))
+    last_signal_bar = {"buy": -10_000, "sell": -10_000}
+    for i in range(60, max(60, n - lookahead - 1)):
         row = merged.iloc[i]
         if row.name < cutoff:
             continue
@@ -431,11 +519,11 @@ def run_full_strategy(pair_name, symbol, strategy_name, cfg,
         key_score = near_key_level(entry, pwh, pwl, pdh, pdl, pair_name, pip_size)
 
         direction = None
-        if bool(long_signal.iloc[i]):
+        if bool(long_candidate.iloc[i]):
             direction = "buy"
             base_score = int(score_bull.iloc[i])
             sl  = entry - a * cfg["atr_mult"]
-        elif bool(short_signal.iloc[i]):
+        elif bool(short_candidate.iloc[i]):
             direction = "sell"
             base_score = int(score_bear.iloc[i])
             sl  = entry + a * cfg["atr_mult"]
@@ -443,20 +531,34 @@ def run_full_strategy(pair_name, symbol, strategy_name, cfg,
         if direction is None:
             continue
 
+        final_score = base_score + key_score
+        adx_value = float(row['adx']) if not pd.isna(row['adx']) else 0.0
+        regime_adjustment = 2 if adx_value < 15 else 1 if adx_value < 20 else 0
+        required_score = cfg["min_score"] + regime_adjustment
+        if final_score < required_score:
+            continue
+        if i - last_signal_bar[direction] < COOLDOWN_BARS:
+            continue
+        last_signal_bar[direction] = i
+
         risk = abs(entry - sl)
-        # A) Fixed-R TP (live logic)
-        tp_fixed = entry + risk * cfg["tp_r"] if direction == "buy" else entry - risk * cfg["tp_r"]
-        out_fixed = check_outcome(merged, i, entry, sl, tp_fixed, direction, pip_size)
+        targets = [entry + risk * r if direction == "buy" else entry - risk * r
+                   for r in FALLBACK_TP_RS]
+        out_fixed = check_race_outcome(
+            merged, i, entry, sl, targets, direction, pip_size, lookahead
+        )
         if not out_fixed:
             continue
 
-        # B) Zone-based TP
+        # Zone comparison applies to the middle/trend objective while the live
+        # race retains three independent targets.
         ztp = zone_tp(entry, direction, pwh, pwl, pdh, pdl, pair_name, risk)
         if ztp is not None:
-            out_zone  = check_outcome(merged, i, entry, sl, ztp, direction, pip_size)
+            out_zone  = check_outcome(merged, i, entry, sl, ztp, direction, pip_size, lookahead)
             zone_used = True
         else:
-            out_zone  = out_fixed   # no valid zone target — same as fixed
+            out_zone  = check_outcome(merged, i, entry, sl, targets[1], direction,
+                                      pip_size, lookahead)
             zone_used = False
 
         # C) NEW: one-notch-wider stop, same R:R ratio, same entry/direction
@@ -466,16 +568,30 @@ def run_full_strategy(pair_name, symbol, strategy_name, cfg,
         else:
             wide_sl = entry + a * wide_mult
         wide_risk = abs(entry - wide_sl)
-        wide_tp = entry + wide_risk * cfg["tp_r"] if direction == "buy" else entry - wide_risk * cfg["tp_r"]
-        out_wide = check_outcome(merged, i, entry, wide_sl, wide_tp, direction, pip_size)
+        wide_targets = [entry + wide_risk * r if direction == "buy" else entry - wide_risk * r
+                        for r in FALLBACK_TP_RS]
+        out_wide = check_race_outcome(
+            merged, i, entry, wide_sl, wide_targets, direction, pip_size, lookahead
+        )
 
         results.append({
             "time": str(row.name)[:16], "strategy": strategy_name,
             "pair": pair_name, "direction": direction.upper(),
-            "score": base_score + key_score, "key_score": key_score,
+            "score": final_score, "key_score": key_score,
+            "required_score": required_score,
             "at_key_level": key_score > 0,
-            "entry": round(entry, 5), "sl": round(sl, 5), "tp": round(tp_fixed, 5),
+            "entry": round(entry, 5), "sl": round(sl, 5),
+            "tp": round(targets[1], 5),
+            "tp1": round(targets[0], 5), "tp2": round(targets[1], 5),
+            "tp3": round(targets[2], 5),
+            "risk_weights": list(RISK_WEIGHTS), "legs": out_fixed["legs"],
+            "trade_permission": "BUY_ONLY" if bool(buy_only.iloc[i]) else
+                                "SELL_ONLY" if bool(sell_only.iloc[i]) else "BOTH",
+            "fib_bonus": bool(price_in_bull_fib.iloc[i] if direction == "buy" else price_in_bear_fib.iloc[i]),
             "result": out_fixed["result"], "pips": out_fixed["pips"], "r": out_fixed["r"],
+            "fixed2_result": out_fixed["legs"][1]["status"],
+            "fixed2_pips": out_fixed["legs"][1]["pips"] or 0.0,
+            "fixed2_r": out_fixed["legs"][1]["r"] or 0.0,
             "zone_used": zone_used,
             "zone_result": out_zone["result"] if out_zone else "OPEN",
             "zone_pips":   out_zone["pips"]   if out_zone else 0.0,
@@ -494,14 +610,25 @@ def generate_report(all_results):
     if not all_results:
         return "NO SIGNALS PASSED FULL FILTER STACK THIS WEEK."
 
-    wins   = [r for r in all_results if r['result'] == 'WIN']
+    resolved = [r for r in all_results if r['result'] in ('WIN', 'LOSS', 'BREAKEVEN')]
+    open_trades = [r for r in all_results if r['result'] == 'OPEN']
+    wins   = [r for r in resolved if r['result'] == 'WIN']
     total  = len(all_results)
-    wr     = len(wins) / total * 100
-    tp     = sum(r['pips'] for r in all_results)
-    ar     = sum(r['r'] for r in all_results) / total
+    closed = len(resolved)
+    wr     = len(wins) / closed * 100 if closed else 0.0
+    tp     = sum(r['pips'] for r in resolved)
+    ar     = sum(r['r'] for r in resolved) / closed if closed else 0.0
+    running_r = peak_r = 0.0
+    max_drawdown_r = 0.0
+    for trade in sorted(resolved, key=lambda item: item['time']):
+        running_r += trade['r']
+        peak_r = max(peak_r, running_r)
+        max_drawdown_r = min(max_drawdown_r, running_r - peak_r)
 
     # Zone comparison — only over trades where a real zone target existed
-    zone_trades = [r for r in all_results if r['zone_used'] and r['zone_result'] in ('WIN', 'LOSS')]
+    zone_trades = [r for r in all_results if r['zone_used'] and
+                   r['zone_result'] in ('WIN', 'LOSS') and
+                   r.get('fixed2_result') in ('WIN', 'LOSS')]
     z_wr = z_tp = z_ar = 0.0
     f_wr = f_tp = f_ar = 0.0
     if zone_trades:
@@ -509,27 +636,38 @@ def generate_report(all_results):
         z_wr = len(zw) / len(zone_trades) * 100
         z_tp = sum(r['zone_pips'] for r in zone_trades)
         z_ar = sum(r['zone_r'] for r in zone_trades) / len(zone_trades)
-        fw   = [r for r in zone_trades if r['result'] == 'WIN']
+        fw   = [r for r in zone_trades if r['fixed2_result'] == 'WIN']
         f_wr = len(fw) / len(zone_trades) * 100
-        f_tp = sum(r['pips'] for r in zone_trades)
-        f_ar = sum(r['r'] for r in zone_trades) / len(zone_trades)
+        f_tp = sum(r['fixed2_pips'] for r in zone_trades)
+        f_ar = sum(r['fixed2_r'] for r in zone_trades) / len(zone_trades)
 
-    at_key  = [r for r in all_results if r['at_key_level']]
-    off_key = [r for r in all_results if not r['at_key_level']]
+    at_key  = [r for r in resolved if r['at_key_level']]
+    off_key = [r for r in resolved if not r['at_key_level']]
     key_wr  = len([r for r in at_key if r['result'] == 'WIN']) / len(at_key) * 100 if at_key else 0
     off_wr  = len([r for r in off_key if r['result'] == 'WIN']) / len(off_key) * 100 if off_key else 0
 
     lines = []
     lines.append("=" * 58)
-    lines.append("  WAVEEDGE FULL-FIDELITY BACKTEST REPORT v4.2")
+    lines.append("  WAVEEDGE FULL-FIDELITY BACKTEST REPORT v5.0")
     lines.append(f"  {(datetime.utcnow()-timedelta(days=7)).strftime('%b %d')} - {datetime.utcnow().strftime('%b %d %Y')}")
     lines.append("  NEW: Fixed-R vs Zone-based TP comparison")
     lines.append("=" * 58)
     lines.append("")
-    lines.append(f"  Total Signals : {total}")
-    lines.append(f"  Win Rate      : {wr:.1f}%   (fixed-R, live logic)")
+    lines.append(f"  Total Setups  : {total} ({closed} resolved, {len(open_trades)} still open)")
+    lines.append(f"  Win Rate      : {wr:.1f}%   (resolved three-position races)")
     lines.append(f"  Total Pips    : {tp:+.1f}")
-    lines.append(f"  Average R     : {ar:+.2f}")
+    lines.append(f"  Expectancy    : {ar:+.2f}R per resolved race")
+    lines.append(f"  Max Drawdown  : {max_drawdown_r:.2f}R (closed-race equity curve)")
+    lines.append(f"  Risk Split    : P1 {RISK_WEIGHTS[0]:.0%} | P2 {RISK_WEIGHTS[1]:.0%} | P3 {RISK_WEIGHTS[2]:.0%}")
+    lines.append("")
+    lines.append("  LEG COMPLETION:")
+    for position in (1, 2, 3):
+        legs = [leg for race in all_results for leg in race.get('legs', [])
+                if leg.get('position') == position]
+        resolved_legs = [leg for leg in legs if leg.get('status') in ('WIN', 'LOSS')]
+        wins_legs = [leg for leg in resolved_legs if leg.get('status') == 'WIN']
+        rate = len(wins_legs) / len(resolved_legs) * 100 if resolved_legs else 0.0
+        lines.append(f"    P{position}: {len(wins_legs):4} TP hits / {len(resolved_legs):4} resolved ({rate:.1f}%)")
     lines.append("")
     lines.append("-" * 58)
     lines.append("TP MODEL COMPARISON (same entries, same stops):")
@@ -545,18 +683,21 @@ def generate_report(all_results):
             lines.append("  VERDICT : No meaningful edge either way — keep fixed-R (simpler)")
     else:
         lines.append("  No trades had a valid zone target this week.")
-    wide_trades = [r for r in all_results if r['wide_result'] in ('WIN', 'LOSS')]
+    wide_trades = [r for r in all_results if r['wide_result'] in ('WIN', 'LOSS', 'BREAKEVEN')
+                   and r['result'] in ('WIN', 'LOSS', 'BREAKEVEN')]
     if wide_trades:
         ww   = [r for r in wide_trades if r['wide_result'] == 'WIN']
         w_wr = len(ww) / len(wide_trades) * 100
         w_pips = sum(r['wide_pips'] for r in wide_trades)
         w_ar = sum(r['wide_r'] for r in wide_trades) / len(wide_trades)
-        cur_wr = len(wins) / total * 100
-        cur_ar = sum(r['r'] for r in all_results) / total
+        current_comparison_wins = [r for r in wide_trades if r['result'] == 'WIN']
+        cur_wr = len(current_comparison_wins) / len(wide_trades) * 100
+        cur_ar = sum(r['r'] for r in wide_trades) / len(wide_trades)
+        cur_pips = sum(r['pips'] for r in wide_trades)
         lines.append("")
         lines.append("-" * 58)
         lines.append(f"STOP-WIDTH TEST (current +{WIDE_STOP_BUMP:.1f} ATR mult, same R:R):")
-        lines.append(f"  CURRENT : {cur_wr:.0f}% WR | {tp:+.1f} pips | {cur_ar:+.2f} avg R")
+        lines.append(f"  CURRENT : {cur_wr:.0f}% WR | {cur_pips:+.1f} pips | {cur_ar:+.2f} avg R")
         lines.append(f"  WIDER   : {w_wr:.0f}% WR | {w_pips:+.1f} pips | {w_ar:+.2f} avg R")
         if w_ar > cur_ar + 0.05:
             lines.append("  VERDICT : WIDER stop shows a real edge this week")
@@ -573,7 +714,11 @@ def generate_report(all_results):
     lines.append("-" * 58)
     lines.append("BY PAIR (fixed-R):")
     for pair in sorted(set(r['pair'] for r in all_results)):
-        pr = [r for r in all_results if r['pair'] == pair]
+        pr_all = [r for r in all_results if r['pair'] == pair]
+        pr = [r for r in pr_all if r['result'] in ('WIN', 'LOSS', 'BREAKEVEN')]
+        if not pr:
+            lines.append(f"  {pair:8}: {len(pr_all):4} setups | no resolved races")
+            continue
         pw = len([r for r in pr if r['result'] == 'WIN'])
         pp = sum(r['pips'] for r in pr)
         pz = [r for r in pr if r['zone_used'] and r['zone_result'] in ('WIN', 'LOSS')]
@@ -583,7 +728,11 @@ def generate_report(all_results):
     lines.append("-" * 58)
     lines.append("BY STRATEGY (fixed-R):")
     for strat in sorted(set(r['strategy'] for r in all_results)):
-        sr = [r for r in all_results if r['strategy'] == strat]
+        sr_all = [r for r in all_results if r['strategy'] == strat]
+        sr = [r for r in sr_all if r['result'] in ('WIN', 'LOSS', 'BREAKEVEN')]
+        if not sr:
+            lines.append(f"  {strat:8}: {len(sr_all):4} setups | no resolved races")
+            continue
         sw = len([r for r in sr if r['result'] == 'WIN'])
         sp = sum(r['pips'] for r in sr)
         lines.append(f"  {strat:8}: {len(sr):4} trades | {sw/len(sr)*100:.0f}% WR | {sp:+.1f} pips")
@@ -591,14 +740,16 @@ def generate_report(all_results):
     lines.append("-" * 58)
     lines.append("ALL SIGNALS (K=key level, Z=zone TP differed):")
     for r in sorted(all_results, key=lambda x: x['time']):
-        icon = "WIN " if r['result'] == 'WIN' else "LOSS"
+        icon = {"WIN": "WIN ", "LOSS": "LOSS", "BREAKEVEN": "FLAT"}.get(r['result'], "OPEN")
         k = "K" if r['at_key_level'] else " "
         z = "Z" if (r['zone_used'] and r['zone_result'] != r['result']) else " "
         lines.append(f"  {icon} {k}{z}| {r['time']} | {r['pair']:7} | {r['strategy']:5} | "
                      f"{r['direction']:4} | sc:{r['score']:2} | {r['pips']:+.1f} pips | {r['r']:+.2f}R")
     lines.append("")
     lines.append("-" * 58)
-    if wr >= 50 and ar >= 0.3:
+    if closed < 10:
+        verdict = "INSUFFICIENT RESOLVED SAMPLE — no live setting change"
+    elif wr >= 50 and ar >= 0.3:
         verdict = "STRONG — positive expectancy confirmed"
     elif wr >= 40:
         verdict = "MARGINAL — monitor one more week"
@@ -611,7 +762,7 @@ def generate_report(all_results):
 
 def main():
     os.makedirs(REPORT_DIR, exist_ok=True)
-    log("Full-fidelity backtest v4 (TP model comparison) starting...")
+    log("Full-fidelity backtest v5 (three-position race) starting...")
 
     all_results = []
     for pair_name, symbol in PAIRS.items():
@@ -641,6 +792,13 @@ def main():
         json.dump(all_results, f, indent=2)
     log(f"Report saved: {report_path}")
     print(report)
+    return {
+        "report_path": report_path,
+        "results_path": json_path,
+        "setups": len(all_results),
+        "resolved": sum(r.get("result") in ("WIN", "LOSS", "BREAKEVEN") for r in all_results),
+        "open": sum(r.get("result") == "OPEN" for r in all_results),
+    }
 
 
 if __name__ == "__main__":
