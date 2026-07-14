@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-WaveEdge Loss Forensics v2 — the Sunday Improvement Engine
+WaveEdge Loss Forensics v3 — three-position-race improvement engine
 Runs every Sunday 23:30 UTC (after the 23:00 backtest) via cron.
 
 WHAT IT DOES:
@@ -21,9 +21,10 @@ import json
 import os
 from datetime import datetime, timezone
 
-REPORT_DIR = "/root/waveedge/reports"
-FLAGS_FILE = "/root/waveedge/data/forensics_flags.json"
-LOG_FILE   = "/root/waveedge/logs/forensics.log"
+HOME = os.getenv("WAVEEDGE_HOME", "/root/waveedge")
+REPORT_DIR = os.getenv("WAVEEDGE_REPORT_DIR", f"{HOME}/reports")
+FLAGS_FILE = os.getenv("WAVEEDGE_FORENSICS_FLAGS", f"{HOME}/data/forensics_flags.json")
+LOG_FILE   = os.getenv("WAVEEDGE_FORENSICS_LOG", f"{HOME}/logs/forensics.log")
 
 YF_SYMBOLS = {
     "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "USDJPY=X",
@@ -77,8 +78,11 @@ def fetch(symbol, interval):
         return None
 
 
-def load_latest_results():
-    files = sorted(glob.glob(f"{REPORT_DIR}/full_results_*.json"))
+def load_latest_results(results_path=None):
+    if results_path:
+        files = [results_path]
+    else:
+        files = sorted(glob.glob(f"{REPORT_DIR}/full_results_*.json"))
     if not files:
         return None, None
     path = files[-1]
@@ -168,13 +172,19 @@ def wr_of(trades):
     return round(w / len(trades) * 100, 1), len(trades)
 
 
-def main():
+def main(results_path=None):
     os.makedirs(REPORT_DIR, exist_ok=True)
-    results, path = load_latest_results()
-    if not results:
+    raw_results, path = load_latest_results(results_path)
+    if not raw_results:
         log("No backtest results found — run the backtest first")
-        return
-    log(f"Loaded {len(results)} trades from {os.path.basename(path)}")
+        return {"status": "no_results", "report_path": None}
+    unresolved = [t for t in raw_results if t.get("result") not in ("WIN", "LOSS", "BREAKEVEN")]
+    results = [t for t in raw_results if t.get("result") in ("WIN", "LOSS", "BREAKEVEN")]
+    if not results:
+        log("Backtest contains no resolved races; no forensic claims generated")
+        return {"status": "no_resolved_results", "report_path": None,
+                "unresolved": len(unresolved)}
+    log(f"Loaded {len(results)} resolved races ({len(unresolved)} open) from {os.path.basename(path)}")
 
     # Enrich each trade with time features
     for t in results:
@@ -218,8 +228,10 @@ def main():
                                                 "CHOP": 0, "UNKNOWN": 0})[cls] += 1
             classified += 1
         log(f"Autopsied {classified} losses")
-    else:
+    elif losses:
         log("Results JSON lacks entry/sl/tp — deploy backtest v4.1; autopsy will run next week")
+    else:
+        log("No losing races in the resolved sample — no loss autopsy needed")
 
     # ── Aggregations
     def table(dim):
@@ -313,10 +325,11 @@ def main():
     # ── Report
     L = []
     L.append("=" * 58)
-    L.append("  WAVEEDGE LOSS FORENSICS v2 — SUNDAY IMPROVEMENT ENGINE")
+    L.append("  WAVEEDGE LOSS FORENSICS v3 — RACE IMPROVEMENT ENGINE")
     L.append(f"  {utcnow().strftime('%Y-%m-%d %H:%M UTC')} | source: {os.path.basename(path)}")
     L.append("=" * 58)
-    L.append(f"  Trades: {total} | Overall WR: {overall_wr}% | Losses: {len(losses)}")
+    L.append(f"  Resolved races: {total} | Overall WR: {overall_wr}% | Losses: {len(losses)}")
+    L.append(f"  Unresolved/open setups excluded honestly: {len(unresolved)}")
     L.append("")
     L.append("-" * 58)
     L.append("LOSS AUTOPSY (why did losers lose?):")
@@ -326,8 +339,10 @@ def main():
         for strat, d in autopsy_by_strat.items():
             L.append(f"    {strat}: tight:{d['TOO_TIGHT_STOP']} wrong:{d['WRONG_DIRECTION']} "
                      f"chop:{d['CHOP']} unk:{d['UNKNOWN']}")
-    else:
+    elif losses:
         L.append("  (needs backtest v4.1 entry/sl/tp data — available next run)")
+    else:
+        L.append("  No losing races in this resolved sample.")
     L.append("")
     L.append("-" * 58)
     L.append("WR BY SESSION (UTC):")
@@ -384,6 +399,8 @@ def main():
         f.write(report)
     log(f"Report saved: {out}")
     print(report)
+    return {"status": "ok", "report_path": out, "resolved": total,
+            "unresolved": len(unresolved), "actionable": sorted(actionable)}
 
 
 if __name__ == "__main__":

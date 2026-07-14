@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-WaveEdge Brain 3 v6 — Market Intelligence Hub + Liquidity Map + Trend Engine
+WaveEdge Brain 3 v7 — closed-candle direction authority and market intelligence
 Runs every 15 minutes via cron.
 NEW in v5:
   - Multi-timeframe trend engine: H1 / H4 / D1 trend per pair (UP/DOWN/SIDEWAYS)
@@ -13,16 +13,18 @@ dual news source, change-detected alerts to notifications.json. No email.
 import json
 import math
 import os
+import tempfile
 from datetime import datetime, timedelta, timezone
 from urllib.request import urlopen, Request
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
-CONTEXT_FILE  = "/root/waveedge/data/market_context.json"
-PREV_CONTEXT  = "/root/waveedge/data/market_context_prev.json"
-NOTIFY_FILE   = "/root/waveedge/data/notifications.json"
-TRADES_FILE   = "/root/waveedge/data/trades.json"
-LOG_FILE      = "/root/waveedge/logs/brain3.log"
-NEWS_FALLBACK = "/root/waveedge/data/news_calendar.json"
+HOME = os.getenv("WAVEEDGE_HOME", "/root/waveedge")
+CONTEXT_FILE  = os.getenv("WAVEEDGE_CONTEXT_FILE", f"{HOME}/data/market_context.json")
+PREV_CONTEXT  = os.getenv("WAVEEDGE_PREV_CONTEXT_FILE", f"{HOME}/data/market_context_prev.json")
+NOTIFY_FILE   = os.getenv("WAVEEDGE_NOTIFY_FILE", f"{HOME}/data/notifications.json")
+TRADES_FILE   = os.getenv("WAVEEDGE_TRADES_FILE", f"{HOME}/data/trades.json")
+LOG_FILE      = os.getenv("WAVEEDGE_BRAIN3_LOG", f"{HOME}/logs/brain3.log")
+NEWS_FALLBACK = os.getenv("WAVEEDGE_NEWS_FILE", f"{HOME}/data/news_calendar.json")
 
 PAIRS = {
     "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "USDJPY=X",
@@ -72,27 +74,41 @@ def log(msg):
     print(line)
 
 
+def atomic_json(path, payload):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, temp = tempfile.mkstemp(prefix=".brain3-", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+
+
 # ─── ALERT SYSTEM (log only, no email) ───────────────────────────────────────
 
 def save_alert(alert_type, title, body):
     try:
-        alerts = []
-        if os.path.exists(NOTIFY_FILE):
-            with open(NOTIFY_FILE, "r") as f:
+        import fcntl
+        os.makedirs(os.path.dirname(NOTIFY_FILE), exist_ok=True)
+        with open(NOTIFY_FILE + ".lock", "a+", encoding="utf-8") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            alerts = []
+            if os.path.exists(NOTIFY_FILE):
                 try:
-                    alerts = json.load(f)
+                    with open(NOTIFY_FILE, "r", encoding="utf-8") as f:
+                        alerts = json.load(f)
                 except Exception:
                     alerts = []
-        alerts.append({
-            "time": utcnow().isoformat(),
-            "time_human": utcnow().strftime("%Y-%m-%d %H:%M UTC"),
-            "type": alert_type,
-            "title": title,
-            "body": body
-        })
-        alerts = alerts[-50:]
-        with open(NOTIFY_FILE, "w") as f:
-            json.dump(alerts, f, indent=2)
+            alerts.append({
+                "time": utcnow().isoformat(),
+                "time_human": utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+                "type": alert_type, "title": title, "body": body
+            })
+            atomic_json(NOTIFY_FILE, alerts[-100:])
         log(f"ALERT [{alert_type}] {title}")
     except Exception as e:
         log(f"Alert save error: {e}")
@@ -121,10 +137,10 @@ def fetch_forexfactory():
                 "source":  "ForexFactory"
             })
         log(f"ForexFactory: {len(events)} med/high events OK")
-        return events
+        return events, True
     except Exception as e:
         log(f"ForexFactory FAILED: {e}")
-        return []
+        return [], False
 
 
 def fetch_investing():
@@ -163,11 +179,11 @@ def fetch_investing():
         )
         if resp.status_code != 200:
             log(f"Investing.com HTTP {resp.status_code} — skipping")
-            return []
+            return [], False
         html = resp.json().get("data", "")
         if not html:
             log("Investing.com empty response — skipping")
-            return []
+            return [], False
         soup = BeautifulSoup(html, "html.parser")
         rows = soup.find_all("tr", {"class": lambda c: c and "js-event-item" in c})
         events = []
@@ -191,41 +207,42 @@ def fetch_investing():
             except Exception:
                 continue
         log(f"Investing.com: {len(events)} HIGH events OK")
-        return events
+        return events, True
     except ImportError:
         log("Investing.com: requests/bs4 not available — skipping")
-        return []
+        return [], False
     except Exception as e:
         log(f"Investing.com FAILED: {e} — skipping")
-        return []
+        return [], False
 
 
 def fetch_news_fallback():
     try:
         if not os.path.exists(NEWS_FALLBACK):
-            return []
+            return [], False
         with open(NEWS_FALLBACK, "r") as f:
-            return json.load(f)
+            payload = json.load(f)
+        if isinstance(payload, dict):
+            events = payload.get("events", payload.get("high_impact_today", []))
+            checked = payload.get("checked_at")
+            fresh = False
+            if checked:
+                try:
+                    stamp = datetime.fromisoformat(str(checked).replace("Z", "+00:00"))
+                    if stamp.tzinfo is not None:
+                        stamp = stamp.astimezone(timezone.utc).replace(tzinfo=None)
+                    fresh = utcnow() - stamp <= timedelta(hours=6)
+                except Exception:
+                    fresh = False
+            return (events if isinstance(events, list) else []), fresh
+        return (payload if isinstance(payload, list) else []), True
     except Exception:
-        return []
+        return [], False
 
 
 def merge_news(ff_events, inv_events):
     def parse_dt(s):
-        if not s:
-            return None
-        try:
-            s = s.strip()
-            dt = datetime.strptime(s[:19], "%Y-%m-%dT%H:%M:%S")
-            tz = s[19:].replace(":", "")
-            if tz and tz not in ("Z", "+0000", "-0000", ""):
-                sign = 1 if "+" in s[19:] else -1
-                tz2  = tz.lstrip("+-")
-                if len(tz2) >= 4:
-                    dt -= sign * timedelta(hours=int(tz2[:2]), minutes=int(tz2[2:4]))
-            return dt
-        except Exception:
-            return None
+        return parse_event_time(s)
 
     def word_set(t):
         return set(t.lower().split())
@@ -254,12 +271,12 @@ def merge_news(ff_events, inv_events):
 
 
 def fetch_all_news():
-    ff  = fetch_forexfactory()
-    inv = fetch_investing()
-    if ff or inv:
+    ff, ff_ok = fetch_forexfactory()
+    inv, inv_ok = fetch_investing()
+    if ff_ok or inv_ok:
         merged = merge_news(ff, inv)
         log(f"News merged: {len(merged)} total ({len(ff)} FF + {len(inv)} Inv unique)")
-        return merged
+        return merged, True
     log("Both live sources failed — using Brain 2 fallback file")
     return fetch_news_fallback()
 
@@ -269,23 +286,48 @@ def fetch_all_news():
 def parse_event_time(s):
     if not s:
         return None
+    value = str(s).strip()
     try:
-        s  = s.strip()
-        dt = datetime.strptime(s[:19], "%Y-%m-%dT%H:%M:%S")
-        tz = s[19:].replace(":", "")
-        if tz and tz not in ("Z", "+0000", "-0000", ""):
-            sign = 1 if "+" in s[19:] else -1
-            tz2  = tz.lstrip("+-")
-            if len(tz2) >= 4:
-                dt -= sign * timedelta(hours=int(tz2[:2]), minutes=int(tz2[2:4]))
-        return dt
-    except Exception:
-        return None
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        parsed = None
+        for fmt in ("%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+            try:
+                parsed = datetime.strptime(value[:19], fmt)
+                break
+            except ValueError:
+                continue
+        if parsed is None:
+            return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+CURRENCY_ALIASES = {
+    "US": "USD", "USA": "USD", "UNITED STATES": "USD",
+    "EU": "EUR", "EMU": "EUR", "EURO ZONE": "EUR",
+    "UK": "GBP", "GB": "GBP", "UNITED KINGDOM": "GBP",
+    "JP": "JPY", "JAPAN": "JPY", "CA": "CAD", "CANADA": "CAD",
+    "AU": "AUD", "AUSTRALIA": "AUD", "NZ": "NZD", "NEW ZEALAND": "NZD",
+    "CH": "CHF", "SWITZERLAND": "CHF",
+}
+
+
+def event_currency(event):
+    raw = str(event.get("country", event.get("currency", ""))).strip().upper()
+    return CURRENCY_ALIASES.get(raw, raw[:3])
+
+
+def event_affects_pair(event, pair):
+    currency = event_currency(event)
+    return not currency or currency in (pair[:3], pair[3:6])
 
 
 def check_news_block(news_data):
     now          = utcnow()
     block_window = now + timedelta(minutes=45)
+    post_window  = now - timedelta(minutes=15)
     warn_window  = now + timedelta(hours=2)
     block, upcoming, critical = False, [], []
 
@@ -296,7 +338,7 @@ def check_news_block(news_data):
         evt_dt = parse_event_time(e.get("date", e.get("time", "")))
         if not evt_dt:
             continue
-        if now <= evt_dt <= warn_window:
+        if post_window <= evt_dt <= warn_window:
             mins = int((evt_dt - now).total_seconds() / 60)
             entry = {
                 "title": e.get("title", "Unknown"),
@@ -307,7 +349,7 @@ def check_news_block(news_data):
                 "source": e.get("source", "")
             }
             upcoming.append(entry)
-            if evt_dt <= block_window and impact == "high":
+            if post_window <= evt_dt <= block_window and impact == "high":
                 block = True
                 critical.append(entry)
     return block, upcoming, critical
@@ -323,7 +365,7 @@ def fetch_ohlcv(symbol, period, interval):
             return None
         try:
             if df.index.tz is not None:
-                df.index = df.index.tz_localize(None)
+                df.index = df.index.tz_convert("UTC").tz_localize(None)
         except Exception:
             pass
         return df
@@ -402,14 +444,20 @@ def get_adx_regime_and_trends(symbol):
         h1 = fetch_ohlcv(symbol, "30d", "1h")
         if h1 is None or len(h1) < 60:
             return None, "UNKNOWN", "UNKNOWN", "UNKNOWN"
-        h4 = h1.resample("4h", label="right", closed="right").agg(
+        # Yahoo timestamps intraday bars at OPEN. Remove the still-forming H1,
+        # then expose each [00:00,04:00) H4 candle only at its 04:00 close.
+        if h1.index[-1] + timedelta(hours=1) > utcnow():
+            h1 = h1.iloc[:-1]
+        h4 = h1.resample("4h", label="right", closed="left").agg(
             {"High": "max", "Low": "min", "Close": "last"}
         ).dropna()
+        h4 = h4[h4.index <= utcnow()]
         if len(h4) < 20:
             return None, "UNKNOWN", "UNKNOWN", "UNKNOWN"
         adx = calc_adx(h4["High"], h4["Low"], h4["Close"])
         v   = round(float(adx.iloc[-1]), 1)
-        regime = "TRENDING" if v >= 25 else "WEAK_TREND" if v >= 18 else "RANGING"
+        # Same 20 ADX boundary used by the historical engine.
+        regime = "TRENDING" if v >= 20 else "WEAK_TREND" if v >= 15 else "RANGING"
         t_h1 = classify_trend(h1["Close"])
         t_h4 = classify_trend(h4["Close"])
         return v, regime, t_h1, t_h4
@@ -423,6 +471,12 @@ def get_d1_bias_and_daily(symbol):
     if d1 is None or len(d1) < 25:
         return "NEUTRAL", None
     try:
+        # The current calendar day's D1 candle is incomplete and cannot be the
+        # higher-timeframe authority.
+        if d1.index[-1].date() >= utcnow().date():
+            d1 = d1.iloc[:-1]
+        if len(d1) < 25:
+            return "NEUTRAL", None
         ema   = calc_ema(d1["Close"], 20)
         close = float(d1["Close"].iloc[-1])
         e20   = float(ema.iloc[-1])
@@ -443,13 +497,30 @@ def get_recent_wr(pair_name, lookback=15):
             t for t in trades
             if t.get("symbol") == pair_name
             and t.get("status") == "executed"
-            and ("WIN" in str(t.get("result", "")).upper()
-                 or "LOSS" in str(t.get("result", "")).upper())
         ]
-        recent = executed[-lookback:]
+        groups = {}
+        for trade in executed:
+            key = trade.get("signal_id") or f"legacy:{trade.get('timestamp')}:{len(groups)}"
+            groups.setdefault(key, []).append(trade)
+        races = []
+        for group in groups.values():
+            expected = max(int(t.get("race_size", 1) or 1) for t in group)
+            if len(group) < expected or any(
+                    str(t.get("result", "")).upper() not in ("WIN", "LOSS")
+                    for t in group):
+                continue
+            timestamp = min(str(t.get("timestamp", "")) for t in group)
+            pnl = 0.0
+            for trade in group:
+                if isinstance(trade.get("realized_pnl"), (int, float)):
+                    pnl += float(trade["realized_pnl"])
+                else:
+                    pnl += float(trade.get("risk_dollars") or 0.0) * float(trade.get("outcome_r") or 0.0)
+            races.append((timestamp, pnl))
+        recent = sorted(races)[-lookback:]
         if not recent:
             return 50.0, 0, 0
-        wins = sum(1 for t in recent if "WIN" in str(t.get("result", "")).upper())
+        wins = sum(1 for _, pnl in recent if pnl > 0)
         return round(wins / len(recent) * 100, 1), wins, len(recent) - wins
     except Exception:
         return 50.0, 0, 0
@@ -466,6 +537,22 @@ def score_adjustment(wr, regime):
     elif regime == "WEAK_TREND":
         adj += 1; reasons.append("weak trend")
     return adj, (", ".join(reasons) or "conditions normal")
+
+
+def trade_permission(t_h1, t_h4, t_d1, regime):
+    """D1+H4 command direction; H1 may confirm an early reversal."""
+    if "UNKNOWN" in (t_h1, t_h4, t_d1):
+        return "WAIT", "missing closed-candle trend data"
+    if t_d1 == "UP" and t_h4 == "UP":
+        return "BUY_ONLY", "D1 and H4 aligned up"
+    if t_d1 == "DOWN" and t_h4 == "DOWN":
+        return "SELL_ONLY", "D1 and H4 aligned down"
+    # Confirmed lower-timeframe reversal may switch before the slower D1 EMA.
+    if t_h4 == "UP" and t_h1 == "UP" and t_d1 == "DOWN" and regime != "RANGING":
+        return "BUY_ONLY", "confirmed H1+H4 bullish reversal"
+    if t_h4 == "DOWN" and t_h1 == "DOWN" and t_d1 == "UP" and regime != "RANGING":
+        return "SELL_ONLY", "confirmed H1+H4 bearish reversal"
+    return "BOTH", "sideways/cross-timeframe market"
 
 
 # ─── LIQUIDITY MAP (from v4) ─────────────────────────────────────────────────
@@ -578,10 +665,14 @@ def detect_and_alert(prev, new):
 
     if new.get("block_all") and not prev.get("block_all"):
         critical = new.get("critical_events", [])
-        lines    = ["Trades PAUSED — high-impact news incoming:\n"]
-        for e in critical:
-            lines.append(f"  {e['impact']} | {e['country']} | {e['title']} — {e['time_utc']} ({e['mins_away']} min)")
-        save_alert("NEWS_BLOCK", "NEWS BLOCK ACTIVATED — trades paused", "\n".join(lines))
+        if critical:
+            lines = ["Trades PAUSED — high-impact news incoming:\n"]
+            for e in critical:
+                lines.append(f"  {e['impact']} | {e['country']} | {e['title']} — {e['time_utc']} ({e['mins_away']} min)")
+            save_alert("NEWS_BLOCK", "NEWS BLOCK ACTIVATED — trades paused", "\n".join(lines))
+        else:
+            save_alert("NEWS_DATA_OFFLINE", "Calendar unavailable — trades paused",
+                       "Both live news sources and the fresh local cache are unavailable.")
 
     if prev.get("block_all") and not new.get("block_all"):
         save_alert("NEWS_CLEAR", "News block cleared — trading resumed",
@@ -603,6 +694,13 @@ def detect_and_alert(prev, new):
 
     for pair, ctx in new.get("pair_context", {}).items():
         prev_ctx = prev.get("pair_context", {}).get(pair, {})
+
+        if ctx.get("news_block") and not prev_ctx.get("news_block"):
+            save_alert("PAIR_NEWS_BLOCK", f"{pair} paused for related high-impact news",
+                       ctx.get("news_block_reason", "High-impact news window"))
+        if not ctx.get("news_block") and prev_ctx.get("news_block"):
+            save_alert("PAIR_NEWS_CLEAR", f"{pair} news window cleared",
+                       f"{pair} may trade again subject to direction and score rules.")
 
         if ctx.get("block") and not prev_ctx.get("block"):
             save_alert(
@@ -656,9 +754,11 @@ def build_context():
     now      = utcnow()
     prev_ctx = load_prev()
 
-    news = fetch_all_news()
+    news, news_available = fetch_all_news()
     block, upcoming, critical = check_news_block(news)
-    if block:
+    if not news_available:
+        log("NEWS DATA UNAVAILABLE: fail-closed global block")
+    elif block:
         log(f"NEWS BLOCK: {[e['title'] for e in critical]}")
     else:
         log(f"News clear — {len(upcoming)} events upcoming (none blocking now)")
@@ -669,45 +769,56 @@ def build_context():
         bias, d1         = get_d1_bias_and_daily(symbol)
         t_d1             = classify_trend(d1["Close"]) if d1 is not None else "UNKNOWN"
         t_state          = trend_alignment(t_h1, t_h4, t_d1)
+        permission, permission_reason = trade_permission(t_h1, t_h4, t_d1, regime)
         wr, wins, losses = get_recent_wr(pair_name)
         adj, reason      = score_adjustment(wr, regime)
         liq_map          = build_liquidity_map(pair_name, d1, bias)
 
-        pair_block   = (regime == "RANGING" and wr < 30)
+        pair_critical = [event for event in critical if event_affects_pair(event, pair_name)]
+        news_block = bool(pair_critical)
+        pair_block   = (regime == "RANGING" and wr < 30) or permission == "WAIT"
         block_reason = f"ranging market + poor performance ({wr:.0f}% WR)" if pair_block else ""
+        if permission == "WAIT":
+            block_reason = permission_reason
 
         pair_context[pair_name] = {
             "adx_4h": adx_val, "regime": regime, "bias_d1": bias,
             "trend_h1": t_h1, "trend_h4": t_h4, "trend_d1": t_d1,
             "trend_state": t_state,
+            "trade_permission": permission,
+            "permission_reason": permission_reason,
             "recent_wr": wr, "recent_wins": wins, "recent_losses": losses,
             "score_adjustment": adj, "reason": reason,
             "block": pair_block, "block_reason": block_reason,
+            "news_block": news_block,
+            "news_block_reason": (f"High-impact {event_currency(pair_critical[0])} news: "
+                                  f"{pair_critical[0]['title']}" if pair_critical else ""),
             "liquidity_map": liq_map
         }
         status = "BLOCKED" if pair_block else f"+{adj}" if adj else "CLEAR"
         log(f"{pair_name}: ADX={adx_val} {regime} | D1:{bias} | "
-            f"trend[H1:{t_h1} H4:{t_h4} D1:{t_d1}] -> {t_state} | WR:{wr:.0f}% | {status}")
+            f"trend[H1:{t_h1} H4:{t_h4} D1:{t_d1}] -> {permission} | WR:{wr:.0f}% | {status}")
 
     context = {
         "updated":              now.isoformat(),
         "updated_human":        now.strftime("%Y-%m-%d %H:%M UTC"),
+        "news_status":          "AVAILABLE" if news_available else "UNAVAILABLE",
         "news_block_active":    block,
         "news_events_upcoming": upcoming,
         "critical_events":      critical,
         "pair_context":         pair_context,
-        "system_mode":          "NEWS_BLOCK" if block else "NORMAL",
-        "block_all":            block
+        "system_mode":          "NEWS_OFFLINE" if not news_available else
+                                "NEWS_BLOCK" if block else "NORMAL",
+        # High-impact events are pair/currency specific. Only a news-data
+        # outage blocks every pair.
+        "block_all":            not news_available
     }
 
-    os.makedirs(os.path.dirname(CONTEXT_FILE), exist_ok=True)
-    with open(CONTEXT_FILE, "w") as f:
-        json.dump(context, f, indent=2)
+    atomic_json(CONTEXT_FILE, context)
 
     detect_and_alert(prev_ctx, context)
 
-    with open(PREV_CONTEXT, "w") as f:
-        json.dump(context, f, indent=2)
+    atomic_json(PREV_CONTEXT, context)
 
     log(f"Context saved — mode: {context['system_mode']}")
     return context
@@ -715,7 +826,7 @@ def build_context():
 
 def print_summary(ctx):
     print("\n" + "=" * 58)
-    print("  WAVEEDGE BRAIN 3 v6 — INTELLIGENCE + TRENDS + LIQUIDITY (+ GOLD)")
+    print("  WAVEEDGE BRAIN 3 v7 — DIRECTION + NEWS + LIQUIDITY")
     print(f"  {ctx['updated_human']}")
     print("=" * 58)
     print(f"  Mode       : {ctx['system_mode']}")
@@ -730,7 +841,7 @@ def print_summary(ctx):
     print("  TREND ENGINE (H1 / H4 / D1 -> verdict):")
     for pair, p in ctx["pair_context"].items():
         print(f"  {pair:8}| {p.get('trend_h1','?'):8}| {p.get('trend_h4','?'):8}| "
-              f"{p.get('trend_d1','?'):8}| {p.get('trend_state','?')}")
+              f"{p.get('trend_d1','?'):8}| {p.get('trade_permission','WAIT')}")
     print("-" * 58)
     print("  PAIR INTELLIGENCE:")
     for pair, p in ctx["pair_context"].items():
