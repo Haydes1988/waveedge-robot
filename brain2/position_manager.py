@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-WaveEdge Position Manager v1 — SHADOW MODE
+WaveEdge Position Manager v2 — SHADOW MODE
 Runs every 5 minutes via cron.
 
 WHAT IT DOES:
@@ -14,9 +14,9 @@ SHADOW MODE (current state):
   It NEVER closes a trade. It only records "would have exited here at
   +X pips" to /root/waveedge/data/exit_signals.json and notifications.json.
   After 1-2 weeks we compare shadow exits vs actual SL/TP outcomes.
-  If early exits genuinely keep more profit, set SHADOW_MODE = False.
 
-  DO NOT flip SHADOW_MODE to False without reviewing the data with Claude.
+  Live close/modify is deliberately unavailable until the broker's exact
+  position-modification schema is validated.
 """
 
 import json
@@ -24,27 +24,27 @@ import os
 from datetime import datetime, timezone
 
 # ─── THE SWITCH ───────────────────────────────────────────────────────────────
-SHADOW_MODE = True   # True = watch and log only. False = actually close trades.
+SHADOW_MODE = True
 # ──────────────────────────────────────────────────────────────────────────────
 
-CONTEXT_FILE  = "/root/waveedge/data/market_context.json"
-EXIT_FILE     = "/root/waveedge/data/exit_signals.json"
-NOTIFY_FILE   = "/root/waveedge/data/notifications.json"
-SCHEMA_FILE   = "/root/waveedge/data/position_schema_sample.json"
-LOG_FILE      = "/root/waveedge/logs/position_manager.log"
+HOME = os.getenv("WAVEEDGE_HOME", "/root/waveedge")
+CONTEXT_FILE  = os.getenv("WAVEEDGE_CONTEXT_FILE", f"{HOME}/data/market_context.json")
+EXIT_FILE     = os.getenv("WAVEEDGE_EXIT_FILE", f"{HOME}/data/exit_signals.json")
+NOTIFY_FILE   = os.getenv("WAVEEDGE_NOTIFY_FILE", f"{HOME}/data/notifications.json")
+SCHEMA_FILE   = os.getenv("WAVEEDGE_POSITION_SCHEMA", f"{HOME}/data/position_schema_sample.json")
+LOG_FILE      = os.getenv("WAVEEDGE_POSITION_LOG", f"{HOME}/logs/position_manager.log")
 
-GCAPI_USER     = "demo-ahedgin"
-GCAPI_PASS     = "Hedgin456$"
-GCAPI_KEY      = "A.Hedgin"
-TRADING_ACC_ID = 407829813
+GCAPI_USER     = os.getenv("WAVEEDGE_GCAPI_USER", "")
+GCAPI_PASS     = os.getenv("WAVEEDGE_GCAPI_PASS", "")
+GCAPI_KEY      = os.getenv("WAVEEDGE_GCAPI_KEY", "")
+TRADING_ACC_ID = int(os.getenv("WAVEEDGE_TRADING_ACC_ID", "407829813"))
 
 REVERSAL_POINT_PIPS = 10   # "near defense level" threshold
 MIN_SIGNALS_TO_FIRE = 2    # how many of the 3 checks must agree
 
 MARKET_MAP = {
-    401484347: "EURUSD", 401484392: "GBPUSD", 401484338: "EURJPY",
-    401484385: "GBPJPY", 401484414: "USDJPY", 401484317: "AUDUSD",
-    401484406: "USDCAD", 401484335: "EURGBP", 401484407: "USDCHF",
+    401484347: "EURUSD", 401484392: "GBPUSD", 401484414: "USDJPY",
+    401484317: "AUDUSD", 401484406: "USDCAD", 401484407: "USDCHF",
     401484402: "NZDUSD"
 }
 
@@ -79,23 +79,28 @@ def log(msg):
 
 def save_alert(alert_type, title, body):
     try:
-        alerts = []
-        if os.path.exists(NOTIFY_FILE):
-            with open(NOTIFY_FILE, "r") as f:
+        import fcntl
+        os.makedirs(os.path.dirname(NOTIFY_FILE), exist_ok=True)
+        with open(NOTIFY_FILE + ".lock", "a+", encoding="utf-8") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            alerts = []
+            if os.path.exists(NOTIFY_FILE):
                 try:
-                    alerts = json.load(f)
+                    with open(NOTIFY_FILE, "r", encoding="utf-8") as f:
+                        alerts = json.load(f)
                 except Exception:
                     alerts = []
-        alerts.append({
-            "time": utcnow().isoformat(),
-            "time_human": utcnow().strftime("%Y-%m-%d %H:%M UTC"),
-            "type": alert_type,
-            "title": title,
-            "body": body
-        })
-        alerts = alerts[-50:]
-        with open(NOTIFY_FILE, "w") as f:
-            json.dump(alerts, f, indent=2)
+            alerts.append({
+                "time": utcnow().isoformat(),
+                "time_human": utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+                "type": alert_type, "title": title, "body": body
+            })
+            alerts = alerts[-100:]
+            temp = f"{NOTIFY_FILE}.tmp.{os.getpid()}"
+            with open(temp, "w", encoding="utf-8") as f:
+                json.dump(alerts, f, indent=2)
+                f.flush(); os.fsync(f.fileno())
+            os.replace(temp, NOTIFY_FILE)
     except Exception as e:
         log(f"Alert save error: {e}")
 
@@ -109,18 +114,33 @@ def save_exit_signal(record):
                     signals = json.load(f)
                 except Exception:
                     signals = []
+        # Do not emit the same exit warning every five minutes for one leg.
+        cutoff = utcnow().timestamp() - 3600
+        for old in reversed(signals):
+            try:
+                old_ts = datetime.fromisoformat(old["time"]).timestamp()
+            except Exception:
+                continue
+            if old_ts < cutoff:
+                break
+            if old.get("position_key") == record.get("position_key"):
+                return False
         signals.append(record)
         signals = signals[-200:]
         with open(EXIT_FILE, "w") as f:
             json.dump(signals, f, indent=2)
+        return True
     except Exception as e:
         log(f"Exit signal save error: {e}")
+        return False
 
 
 # ─── GCAPI POSITIONS ─────────────────────────────────────────────────────────
 
 def get_open_positions():
     try:
+        if not (GCAPI_USER and GCAPI_PASS and GCAPI_KEY):
+            raise RuntimeError("Broker credentials are not configured in environment variables")
         from gcapi import GCapiClient
         api = GCapiClient(username=GCAPI_USER, password=GCAPI_PASS, appkey=GCAPI_KEY)
         pos = api.list_open_positions(trading_acc_id=TRADING_ACC_ID)
@@ -133,7 +153,7 @@ def get_open_positions():
         return positions
     except Exception as e:
         log(f"GCAPI positions error: {e}")
-        return []
+        return None
 
 
 def extract_field(p, names, default=None):
@@ -243,9 +263,12 @@ def check_near_reversal_point(symbol, price):
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 def main():
-    mode = "SHADOW (log only)" if SHADOW_MODE else "LIVE (will close trades)"
+    mode = "SHADOW (log only)"
     positions = get_open_positions()
 
+    if positions is None:
+        log("Broker unavailable — fail-closed; no position conclusions made")
+        return
     if not positions:
         log(f"Mode: {mode} | No open positions — nothing to watch")
         return
@@ -262,6 +285,11 @@ def main():
         direction = str(extract_field(p, ["Direction", "TradeDirection", "direction"], "")).lower()
         entry     = extract_field(p, ["Price", "OpenPrice", "price", "EntryPrice"])
         qty       = extract_field(p, ["Quantity", "quantity", "Size"])
+        position_id = extract_field(p, ["OrderId", "PositionId", "TradeId", "orderId", "positionId"])
+        position_key = f"id:{position_id}" if position_id is not None else f"{market_id}|{direction}|{entry}|{qty}"
+        if direction not in ("buy", "sell"):
+            log(f"{symbol}: unreadable direction {direction!r} — skipping")
+            continue
 
         yf_sym = YF_SYMBOLS.get(symbol)
         df = get_5m_data(yf_sym) if yf_sym else None
@@ -303,30 +331,27 @@ def main():
                 "current_price": current,
                 "pl_pips_at_signal": pl_pips,
                 "quantity": qty,
+                "position_key": position_key,
                 "signals": fired,
-                "mode": "SHADOW" if SHADOW_MODE else "LIVE",
-                "action_taken": "logged only" if SHADOW_MODE else "position closed"
+                "mode": "SHADOW",
+                "action_taken": "logged only"
             }
-            save_exit_signal(record)
+            if not save_exit_signal(record):
+                log(f"Duplicate exit signal suppressed for {symbol} {position_key}")
+                continue
             save_alert(
-                "EXIT_SIGNAL_SHADOW" if SHADOW_MODE else "EXIT_EXECUTED",
+                "EXIT_SIGNAL_SHADOW",
                 f"{symbol} {direction.upper()} reversal detected — "
-                f"{'would exit' if SHADOW_MODE else 'CLOSED'} at {pl_txt}",
+                f"would exit at {pl_txt}",
                 f"Position: {symbol} {direction.upper()}\n"
                 f"Entry:    {entry}\n"
                 f"Now:      {current}\n"
                 f"P/L:      {pl_txt}\n"
                 f"Signals ({len(fired)}/3):\n" +
                 "\n".join(f"  - {s}" for s in fired) +
-                f"\n\nMode: {'SHADOW — trade NOT touched' if SHADOW_MODE else 'LIVE — trade closed'}"
+                "\n\nMode: SHADOW — trade NOT touched"
             )
-            log(f"EXIT SIGNAL {'(shadow)' if SHADOW_MODE else '(LIVE)'}: {symbol} at {pl_txt}")
-
-            if not SHADOW_MODE:
-                # Live close path — intentionally NOT implemented yet.
-                # Requires validated shadow data + GCAPI close-position schema
-                # from SCHEMA_FILE before this block gets written.
-                log("LIVE close requested but close logic not implemented — staying safe")
+            log(f"EXIT SIGNAL (shadow): {symbol} at {pl_txt}")
 
 
 if __name__ == "__main__":
