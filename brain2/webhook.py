@@ -315,7 +315,30 @@ def blocked(stage, reason, symbol=None, action=None):
     return {"executed": False, "block_stage": stage, "block_reason": reason,
             "symbol": symbol, "action": action, "legs": []}
 
-
+def record_active_race(symbol, action, entry, sl, legs):
+    """Called right after place_race() executes successfully — persists
+    race details so breakeven_manager.py (a separate script) can watch
+    for a winning leg and shift the others to breakeven."""
+    import json, os
+    path = "/root/waveedge/data/active_races.json"
+    races = []
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                races = json.load(f)
+        except Exception:
+            races = []
+    races.append({
+        "symbol": symbol, "action": action, "entry": entry, "sl": sl,
+        "opened_at": __import__("datetime").datetime.utcnow().isoformat(),
+        "all_closed": False, "breakeven_shifted": False,
+        "legs": [{"position": leg["position"], "tp": leg["tp"],
+                 "broker_order_id": leg.get("broker_order_id"),
+                 "status": "OPEN"} for leg in legs if leg.get("executed")]
+    })
+    races = races[-100:]
+    with open(path, "w") as f:
+        json.dump(races, f, indent=2)
 def place_race(symbol, action, risk_pct, sl_price, supplied_targets):
     market = MARKET_MAP[symbol]
     daily_pnl, _ = get_daily_pnl()
