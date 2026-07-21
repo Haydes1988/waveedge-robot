@@ -396,6 +396,8 @@ def place_race(symbol, action, risk_pct, sl_price, supplied_targets):
         if not ok:
             break
     executed = [leg for leg in legs if leg["executed"]]
+    if executed:
+       record_active_race(symbol, action, entry, sl_price, legs)
     complete = len(executed) == 3
     stage = None if complete else ("partial_execution" if executed else "broker_rejected")
     reason = None if complete else f"{len(executed)}/3 race legs executed"
