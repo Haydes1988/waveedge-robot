@@ -120,9 +120,19 @@ def on_account_auth_success(result):
 def on_symbols_received(result):
     try:
         parsed = Protobuf.extract(result)
-        for sym in parsed.symbol:
-            SYMBOL_IDS[sym.symbolName] = sym.symbolId
-        log(f"Loaded {len(SYMBOL_IDS)} symbols. XAUUSD id: {SYMBOL_IDS.get('XAUUSD', 'NOT FOUND')}")
+        # cTrader can send back a ProtoOAErrorRes instead of the symbol
+        # list if something about the request was rejected -- surface the
+        # REAL reason instead of a confusing "no attribute symbol" error.
+        if parsed.__class__.__name__ == "ProtoOAErrorRes":
+            log(f"SERVER REJECTED symbol list request — errorCode: "
+                f"{getattr(parsed, 'errorCode', 'unknown')} | "
+                f"description: {getattr(parsed, 'description', 'none given')}")
+        elif hasattr(parsed, "symbol"):
+            for sym in parsed.symbol:
+                SYMBOL_IDS[sym.symbolName] = sym.symbolId
+            log(f"Loaded {len(SYMBOL_IDS)} symbols. XAUUSD id: {SYMBOL_IDS.get('XAUUSD', 'NOT FOUND')}")
+        else:
+            log(f"Unexpected response type: {parsed.__class__.__name__} — full content: {parsed}")
     except Exception as e:
         log(f"Symbol list parse error: {e}")
     start_job_loop()
