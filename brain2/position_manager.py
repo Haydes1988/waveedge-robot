@@ -69,11 +69,6 @@ def utcnow():
 def log(msg):
     ts = utcnow().isoformat()
     line = f"{ts} | POSMGR | {msg}"
-    try:
-        with open(LOG_FILE, "a") as f:
-            f.write(line + "\n")
-    except Exception:
-        pass
     print(line)
 
 

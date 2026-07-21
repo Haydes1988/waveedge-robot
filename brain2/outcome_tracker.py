@@ -33,12 +33,6 @@ def utcnow():
 
 def log(message):
     line = f"{utcnow().isoformat()} | OUTCOME | {message}"
-    try:
-        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-        with open(LOG_FILE, "a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
-    except OSError:
-        pass
     print(line)
 
 
