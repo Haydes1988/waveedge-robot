@@ -45,13 +45,12 @@ def utcnow():
 
 
 def log(msg):
+    # Only print — the cron job's ">> logfile" redirect already captures
+    # this into the log file. Writing directly here too caused every
+    # cron-triggered run to log each line twice (confirmed live: cron
+    # runs showed duplicates, manual runs without the redirect did not).
     ts = utcnow().isoformat()
     line = f"{ts} | BREAKEVEN | {msg}"
-    try:
-        with open(LOG_FILE, "a") as f:
-            f.write(line + "\n")
-    except Exception:
-        pass
     print(line)
 
 
