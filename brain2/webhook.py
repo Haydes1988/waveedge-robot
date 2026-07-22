@@ -339,6 +339,45 @@ def record_active_race(symbol, action, entry, sl, legs):
     races = races[-100:]
     with open(path, "w") as f:
         json.dump(races, f, indent=2)
+CTRADER_SYMBOLS = {"XAUUSD"}
+CTRADER_JOBS_FILE = "/root/waveedge/data/ctrader_jobs.json"
+CTRADER_TEST_VOLUME = 1000
+
+def route_to_ctrader(symbol, action, risk_pct, sl_price, targets):
+    import json, os, uuid
+    from datetime import datetime, timezone
+
+    def utcnow():
+        return datetime.now(timezone.utc).replace(tzinfo=None)
+
+    jobs = []
+    if os.path.exists(CTRADER_JOBS_FILE):
+        try:
+            with open(CTRADER_JOBS_FILE) as jf:
+                jobs = json.load(jf)
+        except Exception:
+            jobs = []
+
+    job_id = str(uuid.uuid4())[:8]
+    job = {
+        "job_id": job_id, "symbol": symbol, "action": action,
+        "volume": CTRADER_TEST_VOLUME, "sl": sl_price,
+        "tp": targets[0] if targets else None,
+        "status": "pending", "created_at": utcnow().isoformat()
+    }
+    jobs.append(job)
+    jobs = jobs[-200:]
+    os.makedirs(os.path.dirname(CTRADER_JOBS_FILE), exist_ok=True)
+    with open(CTRADER_JOBS_FILE, "w") as jf:
+        json.dump(jobs, jf, indent=2)
+
+    log(f"CTRADER JOB QUEUED: {job_id} | {symbol} {action} | "
+        f"vol={CTRADER_TEST_VOLUME} (TEST SIZE -- verify fill before increasing)")
+
+    return {"executed": None, "block_stage": None, "block_reason": None,
+            "symbol": symbol, "action": action, "ctrader_job_id": job_id, "legs": []}
+
+
 def place_race(symbol, action, risk_pct, sl_price, supplied_targets):
     market = MARKET_MAP[symbol]
     daily_pnl, _ = get_daily_pnl()
@@ -435,6 +474,18 @@ def webhook():
 
         if action not in ("buy", "sell"):
             raise ValueError("action must be buy or sell")
+        if symbol in CTRADER_SYMBOLS:
+            context, context_error = read_market_context()
+            approved, reason, required_score = intelligence_check(
+                symbol, strategy, score, action, context
+            )
+            if context_error:
+                reason = context_error + "; execution fails closed"
+                approved = False
+            result = (route_to_ctrader(symbol, action, risk_pct, sl, targets) if approved
+                      else blocked("brain3_reject", reason, symbol, action))
+            return jsonify({"status": "ok", "signal_status": "ctrader_routed",
+                           "detail": result}), 200
         if symbol not in MARKET_MAP:
             raise ValueError(f"unsupported symbol {symbol!r}")
         if risk_pct <= 0:
