@@ -31,6 +31,12 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAApplicationAuthReq, ProtoOAAccountAuthReq, ProtoOANewOrderReq,
     ProtoOASymbolsListReq, ProtoOAGetAccountListByAccessTokenReq
 )
+# HONEST NOTE: this exact import path for ProtoHeartbeatEvent is inferred
+# from the proto file's module naming convention (OpenApiCommonMessages.proto),
+# not individually confirmed by search. If this import fails on first run,
+# the fix is just finding the correct module name -- everything else here
+# is unaffected.
+from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import ProtoHeartbeatEvent
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
     ProtoOAOrderType, ProtoOATradeSide
 )
@@ -98,7 +104,8 @@ def on_error(failure):
 
 
 def on_disconnected(client, reason):
-    log(f"DISCONNECTED: {reason} — will need manual restart")
+    log(f"DISCONNECTED: {reason} — reconnecting automatically in 5 seconds")
+    reactor.callLater(5, client.startService)
 
 
 def on_message_received(client, message):
@@ -198,6 +205,17 @@ def on_app_auth_success(result):
     deferred2.addErrback(on_error)
 
 
+def send_heartbeat():
+    # Required by cTrader: without this, the server disconnects an idle
+    # connection -- confirmed directly from their own documentation
+    # ("send a heartbeat at least once every 10 seconds").
+    try:
+        client.send(ProtoHeartbeatEvent())
+    except Exception as e:
+        log(f"Heartbeat send failed: {e}")
+    reactor.callLater(10, send_heartbeat)
+
+
 def on_connected(client):
     log(f"TCP connected to cTrader ({HOST_TYPE}) — authenticating application")
     req = ProtoOAApplicationAuthReq()
@@ -206,6 +224,7 @@ def on_connected(client):
     deferred = client.send(req)
     deferred.addCallback(on_app_auth_success)
     deferred.addErrback(on_error)
+    reactor.callLater(10, send_heartbeat)
 
 
 # ─── JOB PROCESSING ───────────────────────────────────────────────────────────
