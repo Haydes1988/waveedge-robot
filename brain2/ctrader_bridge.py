@@ -242,14 +242,37 @@ def place_order(job):
 
 
 def check_jobs():
-    jobs = load_json(JOBS_FILE, [])
-    pending = [j for j in jobs if j.get("status") == "pending"]
+    # File-locked read-modify-write: if a second bridge instance is ever
+    # accidentally started (confirmed happened once tonight), this stops
+    # both from grabbing and executing the same pending job.
+    import fcntl
+    lock_path = JOBS_FILE + ".lock"
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    with open(lock_path, "a+") as lockfile:
+        fcntl.flock(lockfile, fcntl.LOCK_EX)
+        jobs = load_json(JOBS_FILE, [])
+        pending = [j for j in jobs if j.get("status") == "pending"]
+        for job in pending:
+            job["status"] = "claimed"  # mark claimed BEFORE processing,
+                                        # while still holding the lock
+        if pending:
+            save_json(JOBS_FILE, jobs)
+
     for job in pending:
         log(f"Processing job {job['job_id']}: {job['action']} {job['symbol']}")
         place_order(job)
         job["status"] = "processed"
+
     if pending:
-        save_json(JOBS_FILE, jobs)
+        with open(lock_path, "a+") as lockfile:
+            fcntl.flock(lockfile, fcntl.LOCK_EX)
+            all_jobs = load_json(JOBS_FILE, [])
+            by_id = {j["job_id"]: j for j in all_jobs}
+            for job in pending:
+                if job["job_id"] in by_id:
+                    by_id[job["job_id"]]["status"] = "processed"
+            save_json(JOBS_FILE, list(by_id.values()))
+
     reactor.callLater(5, check_jobs)  # poll every 5 seconds while connected
 
 
