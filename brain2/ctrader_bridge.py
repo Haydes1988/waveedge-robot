@@ -29,7 +29,7 @@ load_env()
 from ctrader_open_api import Client, Protobuf, TcpProtocol, EndPoints
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAApplicationAuthReq, ProtoOAAccountAuthReq, ProtoOANewOrderReq,
-    ProtoOASymbolsListReq
+    ProtoOASymbolsListReq, ProtoOAGetAccountListByAccessTokenReq
 )
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
     ProtoOAOrderType, ProtoOATradeSide
@@ -108,8 +108,14 @@ def on_message_received(client, message):
 
 
 def on_account_auth_success(result):
-    log("Account authenticated — bridge is live and ready for jobs")
-    # Pull the symbol list once, so we can map "XAUUSD" -> cTrader's symbolId
+    parsed = Protobuf.extract(result)
+    if parsed.__class__.__name__ == "ProtoOAErrorRes":
+        log(f"ACCOUNT AUTH ACTUALLY FAILED (previous version printed a false "
+            f"'authenticated' message here without checking) — errorCode: "
+            f"{getattr(parsed, 'errorCode', 'unknown')} | description: "
+            f"{getattr(parsed, 'description', 'none given')}")
+        return
+    log("Account authenticated (verified, not assumed) — bridge is live and ready for jobs")
     req = ProtoOASymbolsListReq()
     req.ctidTraderAccountId = ACCOUNT_ID
     deferred = client.send(req)
@@ -120,9 +126,6 @@ def on_account_auth_success(result):
 def on_symbols_received(result):
     try:
         parsed = Protobuf.extract(result)
-        # cTrader can send back a ProtoOAErrorRes instead of the symbol
-        # list if something about the request was rejected -- surface the
-        # REAL reason instead of a confusing "no attribute symbol" error.
         if parsed.__class__.__name__ == "ProtoOAErrorRes":
             log(f"SERVER REJECTED symbol list request — errorCode: "
                 f"{getattr(parsed, 'errorCode', 'unknown')} | "
@@ -138,14 +141,61 @@ def on_symbols_received(result):
     start_job_loop()
 
 
+def on_account_list_received(result, expected_account_id):
+    """Fetches the REAL account list tied to this access token, and checks
+    whether the account ID we've been given actually matches one of them.
+    This is the documented, correct sequence per cTrader's own forum
+    guidance: Authorize App -> Get Accounts List -> Authenticate Account.
+    Skipping straight to account auth with a UI-copied number risks using
+    a display login instead of the real ctidTraderAccountId."""
+    try:
+        parsed = Protobuf.extract(result)
+        if parsed.__class__.__name__ == "ProtoOAErrorRes":
+            log(f"GET ACCOUNTS LIST REJECTED — errorCode: "
+                f"{getattr(parsed, 'errorCode', 'unknown')} | "
+                f"description: {getattr(parsed, 'description', 'none given')}")
+            return
+        real_ids = []
+        for acc in getattr(parsed, "ctidTraderAccount", []):
+            acc_id = acc.ctidTraderAccountId
+            is_live = getattr(acc, "isLive", None)
+            trader_login = getattr(acc, "traderLogin", None)
+            real_ids.append(acc_id)
+            log(f"REAL ACCOUNT FOUND: ctidTraderAccountId={acc_id} "
+                f"| isLive={is_live} | traderLogin={trader_login} "
+                f"{'<-- MATCHES your .env value' if acc_id == expected_account_id else ''}")
+        if expected_account_id not in real_ids:
+            log(f"⚠️ MISMATCH: your CTRADER_ACCOUNT_ID ({expected_account_id}) does "
+                f"NOT match any real account ID above. Update .env to one of the "
+                f"real ctidTraderAccountId values shown, then restart this script.")
+        else:
+            log(f"Confirmed: {expected_account_id} is a real, valid account ID for this token")
+    except Exception as e:
+        log(f"Account list parse error: {e}")
+
+
 def on_app_auth_success(result):
-    log("Application authenticated — authenticating account next")
-    req = ProtoOAAccountAuthReq()
-    req.ctidTraderAccountId = ACCOUNT_ID
+    parsed = Protobuf.extract(result)
+    if parsed.__class__.__name__ == "ProtoOAErrorRes":
+        log(f"APP AUTH ACTUALLY FAILED (previous version wouldn't have caught this) "
+            f"— errorCode: {getattr(parsed, 'errorCode', 'unknown')} | "
+            f"description: {getattr(parsed, 'description', 'none given')}")
+        return
+    log("Application authenticated — fetching real account list before authenticating account")
+    req = ProtoOAGetAccountListByAccessTokenReq()
     req.accessToken = ACCESS_TOKEN
     deferred = client.send(req)
-    deferred.addCallback(on_account_auth_success)
+    deferred.addCallback(lambda r: on_account_list_received(r, ACCOUNT_ID))
     deferred.addErrback(on_error)
+
+    # Proceed with account auth using the ID we have -- the account list
+    # check above runs in parallel purely to confirm/flag a mismatch.
+    req2 = ProtoOAAccountAuthReq()
+    req2.ctidTraderAccountId = ACCOUNT_ID
+    req2.accessToken = ACCESS_TOKEN
+    deferred2 = client.send(req2)
+    deferred2.addCallback(on_account_auth_success)
+    deferred2.addErrback(on_error)
 
 
 def on_connected(client):
