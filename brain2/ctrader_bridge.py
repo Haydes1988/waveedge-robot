@@ -212,7 +212,12 @@ def send_heartbeat():
     # connection -- confirmed directly from their own documentation
     # ("send a heartbeat at least once every 10 seconds").
     try:
-        client.send(ProtoHeartbeatEvent())
+        d = client.send(ProtoHeartbeatEvent())
+        # Heartbeats don't need a real response -- attach a no-op errback
+        # so a timeout waiting for one doesn't surface as an "Unhandled
+        # error in Deferred" (that was happening every ~5 seconds before
+        # this fix, cluttering the log and possibly compounding instability).
+        d.addErrback(lambda f: None)
         _heartbeat_count[0] += 1
         # Log every 6th heartbeat (roughly once a minute) so there's
         # POSITIVE confirmation this is working, not just silence.
