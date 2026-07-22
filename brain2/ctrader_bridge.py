@@ -205,12 +205,19 @@ def on_app_auth_success(result):
     deferred2.addErrback(on_error)
 
 
+_heartbeat_count = [0]
+
 def send_heartbeat():
     # Required by cTrader: without this, the server disconnects an idle
     # connection -- confirmed directly from their own documentation
     # ("send a heartbeat at least once every 10 seconds").
     try:
         client.send(ProtoHeartbeatEvent())
+        _heartbeat_count[0] += 1
+        # Log every 6th heartbeat (roughly once a minute) so there's
+        # POSITIVE confirmation this is working, not just silence.
+        if _heartbeat_count[0] % 6 == 0:
+            log(f"Heartbeat OK (sent {_heartbeat_count[0]} so far, connection alive)")
     except Exception as e:
         log(f"Heartbeat send failed: {e}")
     reactor.callLater(10, send_heartbeat)
