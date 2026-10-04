@@ -3,7 +3,7 @@
 
 One approved setup opens one coordinated three-position race. All legs share
 the broker entry and stop, have progressive TP1/TP2/TP3 objectives, and split
-one account-level risk budget 40/35/25.
+one account-level risk budget into three equal thirds.
 """
 
 import hashlib
@@ -38,7 +38,7 @@ TOTAL_DRAWDOWN_LIMIT = float(os.getenv("WAVEEDGE_TOTAL_DRAWDOWN_LIMIT", "75"))
 MAX_RISK_PCT = float(os.getenv("WAVEEDGE_MAX_RISK_PCT", "1.0"))
 MAX_POSITIONS_PER_SYMBOL = 3
 MAX_TOTAL_POSITIONS = int(os.getenv("WAVEEDGE_MAX_TOTAL_POSITIONS", "9"))
-RISK_WEIGHTS = (0.40, 0.35, 0.25)
+RISK_WEIGHTS = (1 / 3, 1 / 3, 1 / 3)
 FALLBACK_TP_RS = (1.0, 2.0, 3.5)
 MIN_TP_RS = (0.8, 1.5, 2.0)
 BASE_MIN_SCORES = {"Scalp": 7, "Day": 7, "Swing": 8}
