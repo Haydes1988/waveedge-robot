@@ -14,7 +14,7 @@ WEBHOOK_LOG = os.getenv("WAVEEDGE_WEBHOOK_LOG", f"{HOME}/logs/webhook.log")
 ALERT_FILE = os.getenv("WAVEEDGE_NOTIFY_FILE", f"{HOME}/data/notifications.json")
 STATE_FILE = os.getenv("WAVEEDGE_MONITOR_STATE", f"{HOME}/data/monitor_state.json")
 WEBHOOK_SCRIPT = os.getenv("WAVEEDGE_WEBHOOK_SCRIPT", f"{HOME}/brain2/webhook.py")
-HEALTH_URL = os.getenv("WAVEEDGE_HEALTH_URL", "http://127.0.0.1/health")
+HEALTH_URL = os.getenv("WAVEEDGE_HEALTH_URL", "http://127.0.0.1:5500/health")
 
 GCAPI_USER = os.getenv("WAVEEDGE_GCAPI_USER", "")
 GCAPI_PASS = os.getenv("WAVEEDGE_GCAPI_PASS", "")
@@ -136,10 +136,12 @@ def restart_webhook():
     if not os.path.isfile(WEBHOOK_SCRIPT):
         raise FileNotFoundError(f"Webhook script not found: {WEBHOOK_SCRIPT}")
     os.makedirs(os.path.dirname(WEBHOOK_LOG), exist_ok=True)
+    env = os.environ.copy()
+    env.setdefault("WAVEEDGE_PORT", "5500")
     with open(WEBHOOK_LOG, "a", encoding="utf-8") as output:
         subprocess.Popen(["python3", WEBHOOK_SCRIPT], stdout=output,
                          stderr=subprocess.STDOUT, start_new_session=True,
-                         close_fds=True)
+                         close_fds=True, env=env)
 
 
 def check_webhook_alive():
