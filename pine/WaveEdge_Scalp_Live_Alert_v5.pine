@@ -1,0 +1,310 @@
+//@version=5
+// WaveEdge Scalp Live Alert v5 — TradingView → robot webhook
+//
+// PURPOSE: fire alert() JSON the live robot can execute. This is NOT the
+// backtest strategy. Paste on a 5-Minute chart and create a
+// webhook alert to https://waveedge.pulseandprosper.com/webhook
+//
+// CONFIDENCE → LEGS (score tiers, NOT win-rate %):
+// Scalp score scale ~0-18. Thresholds are score tiers (NOT measured win-rate %). Defaults: min7→1leg, med9→2legs, high11→3legs. Chart must be 5m.
+// Total risk sent = fullRiskPct * legs / 3 (low confidence = less dollars at risk).
+//
+// ROBOT CONTRACT:
+// {"pass","sym","action","strategy","score","risk","legs","sl","tp1"[,tp2][,tp3],"bar_time"}
+// legs=1|2|3; omit higher TPs when legs < 3. Robot splits risk 100% / 50-50 / thirds.
+//
+// GATES: countertrend/sideways OFF by default; EMA10/23 hard gate on fast HTF;
+// confirmed bars only; independent buy AND sell paths.
+// SL/TP prices are computed from signal-bar close ± ATR (proxy for fill).
+// Robot re-checks stop side against live broker entry.
+indicator("WaveEdge Scalp Live Alert v5", overlay=true, max_bars_back=1000)
+
+// ---- Inputs ----
+webhookPass = input.string("REPLACE_WITH_PASSPHRASE", "Webhook Passphrase", group="Webhook",
+     tooltip="Must match WAVEEDGE_WEBHOOK_PASSPHRASE on the server.")
+fibLookback = input.int(60, "HTF Fibonacci Lookback", minval=10, group="Structure")
+rangeLookback = input.int(30, "HTF Entry Range Lookback", minval=10, group="Structure")
+fibBufferPct = input.float(0.00075, "Fibonacci Buffer Percentage", minval=0.0, step=0.00005, group="Structure")
+pivotLength = input.int(10, "EQH/EQL Pivot Length", minval=2, group="Structure")
+eqTolerancePct = input.float(0.0010, "EQH/EQL Percentage Tolerance", minval=0.0001, step=0.0001, group="Structure")
+adxLength = input.int(14, "ADX Length", minval=2, group="Regime")
+minimumAdx = input.float(16.0, "Minimum Fast-HTF ADX", minval=1.0, step=0.5, group="Regime")
+atrLength = input.int(14, "ATR Length", minval=1, group="Risk")
+atrStopMultiplier = input.float(1.2, "ATR Stop Multiplier", minval=0.1, step=0.1, group="Risk")
+bosLookback = input.int(8, "Break-of-Structure Lookback", minval=2, group="Structure")
+counterWindow = input.int(12, "Countertrend Confirmation Window", minval=1, group="Filters")
+waveTrendWindow = input.int(5, "WaveTrend Cross Window", minval=1, group="WaveTrend")
+waveTrendChannelLength = input.int(10, "WaveTrend Channel Length", minval=1, group="WaveTrend")
+waveTrendAverageLength = input.int(21, "WaveTrend Average Length", minval=1, group="WaveTrend")
+waveTrendSignalLength = input.int(4, "WaveTrend Signal Smoothing", minval=1, group="WaveTrend")
+waveTrendOversold = input.float(-53.0, "WaveTrend Oversold", group="WaveTrend")
+waveTrendOverbought = input.float(53.0, "WaveTrend Overbought", group="WaveTrend")
+bodyAverageLength = input.int(20, "Average Candle Body Length", minval=2, group="Candles")
+
+minTradeScore = input.int(7, "Min Trade Score (1 leg floor)", minval=1, maxval=18, group="Confidence Tiers",
+     tooltip="Below this: no alert. At/above and below medium: 1 leg.")
+mediumLegsScore = input.int(9, "Medium Score (≥ → 2 legs)", minval=1, maxval=18, group="Confidence Tiers")
+highLegsScore = input.int(11, "High Score (≥ → 3 legs)", minval=1, maxval=18, group="Confidence Tiers")
+requireTrendFib = input.bool(false, "Require Fib for Trend Trades", group="Filters")
+enableCountertrendTrades = input.bool(false, "Enable Countertrend Trades", group="Filters")
+enableSidewaysTrades = input.bool(false, "Enable Sideways Trades", group="Filters")
+requireOneHourShift = input.bool(true, "Require Fast-HTF Shift for Countertrend", group="Filters")
+enforceChartTimeframe = input.bool(true, "Require 5-Minute Chart", group="Filters")
+tp1Multiple = input.float(1.0, "TP1 R Multiple", minval=0.25, step=0.25, group="Targets")
+tp2Multiple = input.float(2.0, "TP2 R Multiple", minval=0.50, step=0.25, group="Targets")
+tp3Multiple = input.float(3.0, "TP3 R Multiple", minval=0.75, step=0.25, group="Targets")
+fullRiskPct = input.float(0.6, "Full (3-leg) Total Risk %", minval=0.01, step=0.05, group="Risk",
+     tooltip="Actual risk sent = fullRiskPct * legs / 3. Robot also caps at MAX_RISK_PCT.")
+counterRiskPct = input.float(0.35, "Countertrend Full Risk %", minval=0.01, step=0.05, group="Risk")
+sidewaysRiskPct = input.float(0.35, "Sideways Full Risk %", minval=0.01, step=0.05, group="Risk")
+
+correctChartTimeframe = timeframe.period == "5"
+chartTimeframeAllowed = not enforceChartTimeframe or correctChartTimeframe
+
+// ---- Higher-timeframe regime (4H / 1H / 15M) ----
+dailyClose = request.security(syminfo.tickerid, "240", close[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+dailyEma20 = request.security(syminfo.tickerid, "240", ta.ema(close, 20)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+dailyEma50 = request.security(syminfo.tickerid, "240", ta.ema(close, 50)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+h4Close = request.security(syminfo.tickerid, "60", close[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+h4Ema20 = request.security(syminfo.tickerid, "60", ta.ema(close, 20)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+h4Ema50 = request.security(syminfo.tickerid, "60", ta.ema(close, 50)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+h4PlusDm = request.security(syminfo.tickerid, "60", ta.rma(ta.change(high) > -ta.change(low) and ta.change(high) > 0 ? ta.change(high) : 0, adxLength)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+h4MinusDm = request.security(syminfo.tickerid, "60", ta.rma(-ta.change(low) > ta.change(high) and -ta.change(low) > 0 ? -ta.change(low) : 0, adxLength)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+h4TrueRange = request.security(syminfo.tickerid, "60", ta.rma(ta.tr(true), adxLength)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+h1Close = request.security(syminfo.tickerid, "15", close[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+h1Ema20 = request.security(syminfo.tickerid, "15", ta.ema(close, 20)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+h1Ema50 = request.security(syminfo.tickerid, "15", ta.ema(close, 50)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+h1Ema20Previous = request.security(syminfo.tickerid, "15", ta.ema(close, 20)[2], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+h1Ema10 = request.security(syminfo.tickerid, "15", ta.ema(close, 10)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+h1Ema23 = request.security(syminfo.tickerid, "15", ta.ema(close, 23)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+h1PlusDm = request.security(syminfo.tickerid, "15", ta.rma(ta.change(high) > -ta.change(low) and ta.change(high) > 0 ? ta.change(high) : 0, adxLength)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+h1MinusDm = request.security(syminfo.tickerid, "15", ta.rma(-ta.change(low) > ta.change(high) and -ta.change(low) > 0 ? -ta.change(low) : 0, adxLength)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+h1TrueRange = request.security(syminfo.tickerid, "15", ta.rma(ta.tr(true), adxLength)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+h1Adx = request.security(syminfo.tickerid, "15", ta.rma(100 * math.abs(ta.rma(ta.change(high) > -ta.change(low) and ta.change(high) > 0 ? ta.change(high) : 0, adxLength) - ta.rma(-ta.change(low) > ta.change(high) and -ta.change(low) > 0 ? -ta.change(low) : 0, adxLength)) / math.max(ta.rma(ta.change(high) > -ta.change(low) and ta.change(high) > 0 ? ta.change(high) : 0, adxLength) + ta.rma(-ta.change(low) > ta.change(high) and -ta.change(low) > 0 ? -ta.change(low) : 0, adxLength), 0.0000001), adxLength)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+h1SwingHigh = request.security(syminfo.tickerid, "15", ta.highest(high, fibLookback)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+h1SwingLow = request.security(syminfo.tickerid, "15", ta.lowest(low, fibLookback)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+h1RangeHigh = request.security(syminfo.tickerid, "15", ta.highest(high, rangeLookback)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+h1RangeLow = request.security(syminfo.tickerid, "15", ta.lowest(low, rangeLookback)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+h1BullFvg = request.security(syminfo.tickerid, "15", low[1] > high[3], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+h1BearFvg = request.security(syminfo.tickerid, "15", high[1] < low[3], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+
+h4PlusDi = h4TrueRange > 0 ? 100 * h4PlusDm / h4TrueRange : 0
+h4MinusDi = h4TrueRange > 0 ? 100 * h4MinusDm / h4TrueRange : 0
+h1PlusDi = h1TrueRange > 0 ? 100 * h1PlusDm / h1TrueRange : 0
+h1MinusDi = h1TrueRange > 0 ? 100 * h1MinusDm / h1TrueRange : 0
+
+dailyBullish = dailyClose > dailyEma20 and dailyEma20 > dailyEma50
+dailyBearish = dailyClose < dailyEma20 and dailyEma20 < dailyEma50
+h4Bullish = h4Close > h4Ema20 and h4Ema20 > h4Ema50 and h4PlusDi > h4MinusDi
+h4Bearish = h4Close < h4Ema20 and h4Ema20 < h4Ema50 and h4MinusDi > h4PlusDi
+h1Bullish = h1Close > h1Ema20 and h1Ema20 > h1Ema50 and h1PlusDi > h1MinusDi
+h1Bearish = h1Close < h1Ema20 and h1Ema20 < h1Ema50 and h1MinusDi > h1PlusDi
+
+confirmedBullishRegime = dailyBullish and h4Bullish and h1Bullish and h1Adx >= minimumAdx
+confirmedBearishRegime = dailyBearish and h4Bearish and h1Bearish and h1Adx >= minimumAdx
+sidewaysRegime = not confirmedBullishRegime and not confirmedBearishRegime
+
+emaBullAligned = h1Ema10 > h1Ema23
+emaBearAligned = h1Ema10 < h1Ema23
+
+bearishContext = confirmedBearishRegime or (dailyBearish and h4Bearish) or (h4Bearish and h1Bearish)
+bullishContext = confirmedBullishRegime or (dailyBullish and h4Bullish) or (h4Bullish and h1Bullish)
+barsSinceBearishContext = ta.barssince(bearishContext)
+barsSinceBullishContext = ta.barssince(bullishContext)
+recentBearishContext = bearishContext or (not na(barsSinceBearishContext) and barsSinceBearishContext <= counterWindow)
+recentBullishContext = bullishContext or (not na(barsSinceBullishContext) and barsSinceBullishContext <= counterWindow)
+
+h1BullShift = h1Close > h1Ema20 or h1PlusDi > h1MinusDi or h1Ema20 > h1Ema20Previous
+h1BearShift = h1Close < h1Ema20 or h1MinusDi > h1PlusDi or h1Ema20 < h1Ema20Previous
+counterBullShiftPassed = not requireOneHourShift or h1BullShift
+counterBearShiftPassed = not requireOneHourShift or h1BearShift
+
+sidewaysBullBiasAllowed = not (dailyBearish and h4Bearish) and not (h4Bearish and h1Bearish)
+sidewaysBearBiasAllowed = not (dailyBullish and h4Bullish) and not (h4Bullish and h1Bullish)
+
+h1Range = h1RangeHigh - h1RangeLow
+h1Midpoint = h1RangeLow + h1Range * 0.50
+h1DeepDiscountLevel = h1RangeLow + h1Range * 0.25
+h1HighPremiumLevel = h1RangeLow + h1Range * 0.75
+h1RangeValid = not na(h1RangeHigh) and not na(h1RangeLow) and h1RangeHigh > h1RangeLow
+inDiscount = h1RangeValid and close <= h1Midpoint
+inPremium = h1RangeValid and close >= h1Midpoint
+inDeepDiscount = h1RangeValid and close <= h1DeepDiscountLevel
+inHighPremium = h1RangeValid and close >= h1HighPremiumLevel
+
+h1FibRange = h1SwingHigh - h1SwingLow
+h1FibValid = not na(h1SwingHigh) and not na(h1SwingLow) and h1SwingHigh > h1SwingLow
+fibBufferAmount = close * fibBufferPct
+bullFib50 = h1SwingHigh - h1FibRange * 0.50
+bullFib618 = h1SwingHigh - h1FibRange * 0.618
+bullFibLow = math.min(bullFib50, bullFib618) - fibBufferAmount
+bullFibHigh = math.max(bullFib50, bullFib618) + fibBufferAmount
+bearFib50 = h1SwingLow + h1FibRange * 0.50
+bearFib618 = h1SwingLow + h1FibRange * 0.618
+bearFibLow = math.min(bearFib50, bearFib618) - fibBufferAmount
+bearFibHigh = math.max(bearFib50, bearFib618) + fibBufferAmount
+bullFibTouch = h1FibValid and low <= bullFibHigh and high >= bullFibLow
+bearFibTouch = h1FibValid and high >= bearFibLow and low <= bearFibHigh
+
+pivotHigh = ta.pivothigh(high, pivotLength, pivotLength)
+pivotLow = ta.pivotlow(low, pivotLength, pivotLength)
+latestPivotHigh = ta.valuewhen(not na(pivotHigh), pivotHigh, 0)
+latestPivotLow = ta.valuewhen(not na(pivotLow), pivotLow, 0)
+previousPivotHigh = ta.valuewhen(not na(pivotHigh), pivotHigh, 1)
+previousPivotLow = ta.valuewhen(not na(pivotLow), pivotLow, 1)
+equalHighReference = not na(latestPivotHigh) and not na(previousPivotHigh) ? math.abs((latestPivotHigh + previousPivotHigh) / 2) : na
+equalLowReference = not na(latestPivotLow) and not na(previousPivotLow) ? math.abs((latestPivotLow + previousPivotLow) / 2) : na
+equalHighDistancePct = not na(equalHighReference) and equalHighReference > 0 ? math.abs(latestPivotHigh - previousPivotHigh) / equalHighReference : na
+equalLowDistancePct = not na(equalLowReference) and equalLowReference > 0 ? math.abs(latestPivotLow - previousPivotLow) / equalLowReference : na
+equalHighDetected = not na(equalHighDistancePct) and equalHighDistancePct <= eqTolerancePct
+equalLowDetected = not na(equalLowDistancePct) and equalLowDistancePct <= eqTolerancePct
+equalHighLevel = equalHighDetected ? math.max(latestPivotHigh, previousPivotHigh) : na
+equalLowLevel = equalLowDetected ? math.min(latestPivotLow, previousPivotLow) : na
+equalHighSweep = equalHighDetected and high > equalHighLevel and close < equalHighLevel
+equalLowSweep = equalLowDetected and low < equalLowLevel and close > equalLowLevel
+
+wtSourceAverage = ta.ema(hlc3, waveTrendChannelLength)
+wtDeviation = ta.ema(math.abs(hlc3 - wtSourceAverage), waveTrendChannelLength)
+wtComposite = wtDeviation > 0 ? (hlc3 - wtSourceAverage) / (0.015 * wtDeviation) : 0
+wtMain = ta.ema(wtComposite, waveTrendAverageLength)
+wtSignal = ta.sma(wtMain, waveTrendSignalLength)
+wtBullCross = ta.crossover(wtMain, wtSignal)
+wtBearCross = ta.crossunder(wtMain, wtSignal)
+wtBullDirection = wtMain > wtSignal
+wtBearDirection = wtMain < wtSignal
+wtIsOversold = wtMain <= waveTrendOversold
+wtIsOverbought = wtMain >= waveTrendOverbought
+
+candleBody = math.abs(close - open)
+averageCandleBody = ta.sma(candleBody, bodyAverageLength)
+candleRange = high - low
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
+safeCandleBody = math.max(candleBody, syminfo.mintick)
+bullEngulfing = close > open and close[1] < open[1] and close >= open[1] and open <= close[1] and candleBody >= math.abs(close[1] - open[1]) * 0.80
+bearEngulfing = close < open and close[1] > open[1] and close <= open[1] and open >= close[1] and candleBody >= math.abs(close[1] - open[1]) * 0.80
+bullPinBar = candleRange > 0 and lowerWick >= safeCandleBody * 2 and close >= low + candleRange * 0.60
+bearPinBar = candleRange > 0 and upperWick >= safeCandleBody * 2 and close <= high - candleRange * 0.60
+bullReversalCandle = bullEngulfing or bullPinBar
+bearReversalCandle = bearEngulfing or bearPinBar
+bullMomentumCandle = close > open and candleBody >= averageCandleBody * 1.25 and candleRange > 0 and close >= low + candleRange * 0.75
+bearMomentumCandle = close < open and candleBody >= averageCandleBody * 1.25 and candleRange > 0 and close <= low + candleRange * 0.25
+strongBullCandle = bullReversalCandle or bullMomentumCandle
+strongBearCandle = bearReversalCandle or bearMomentumCandle
+
+bullishBOSLevel = ta.highest(high, bosLookback)[1]
+bearishBOSLevel = ta.lowest(low, bosLookback)[1]
+bullishBOS = barstate.isconfirmed and close > bullishBOSLevel and close > open
+bearishBOS = barstate.isconfirmed and close < bearishBOSLevel and close < open
+
+barsSinceEqualLowSweep = ta.barssince(equalLowSweep)
+barsSinceEqualHighSweep = ta.barssince(equalHighSweep)
+barsSinceBullReversal = ta.barssince(bullReversalCandle)
+barsSinceBearReversal = ta.barssince(bearReversalCandle)
+barsSinceBullFibTouch = ta.barssince(bullFibTouch)
+barsSinceBearFibTouch = ta.barssince(bearFibTouch)
+barsSinceDeepDiscount = ta.barssince(inDeepDiscount)
+barsSinceHighPremium = ta.barssince(inHighPremium)
+barsSinceBullWtCross = ta.barssince(wtBullCross)
+barsSinceBearWtCross = ta.barssince(wtBearCross)
+recentEqualLowSweep = not na(barsSinceEqualLowSweep) and barsSinceEqualLowSweep <= counterWindow
+recentEqualHighSweep = not na(barsSinceEqualHighSweep) and barsSinceEqualHighSweep <= counterWindow
+recentBullReversal = not na(barsSinceBullReversal) and barsSinceBullReversal <= counterWindow
+recentBearReversal = not na(barsSinceBearReversal) and barsSinceBearReversal <= counterWindow
+recentBullFibTouch = not na(barsSinceBullFibTouch) and barsSinceBullFibTouch <= counterWindow
+recentBearFibTouch = not na(barsSinceBearFibTouch) and barsSinceBearFibTouch <= counterWindow
+recentDeepDiscount = not na(barsSinceDeepDiscount) and barsSinceDeepDiscount <= counterWindow
+recentHighPremium = not na(barsSinceHighPremium) and barsSinceHighPremium <= counterWindow
+recentBullWtCross = not na(barsSinceBullWtCross) and barsSinceBullWtCross <= waveTrendWindow
+recentBearWtCross = not na(barsSinceBearWtCross) and barsSinceBearWtCross <= waveTrendWindow
+
+bullScore = (dailyBullish ? 2 : 0) + (h4Bullish ? 2 : 0) + (h1Bullish ? 2 : 0) + (bullFibTouch ? 1 : 0) + (inDiscount ? 1 : 0) + (inDeepDiscount ? 1 : 0) + (wtBullCross ? 2 : 0) + (wtIsOversold ? 1 : 0) + (bullReversalCandle ? 2 : 0) + (bullMomentumCandle ? 1 : 0) + (h1BullFvg ? 1 : 0) + (equalLowSweep ? 2 : 0)
+bearScore = (dailyBearish ? 2 : 0) + (h4Bearish ? 2 : 0) + (h1Bearish ? 2 : 0) + (bearFibTouch ? 1 : 0) + (inPremium ? 1 : 0) + (inHighPremium ? 1 : 0) + (wtBearCross ? 2 : 0) + (wtIsOverbought ? 1 : 0) + (bearReversalCandle ? 2 : 0) + (bearMomentumCandle ? 1 : 0) + (h1BearFvg ? 1 : 0) + (equalHighSweep ? 2 : 0)
+counterBuyScore = (recentBearishContext ? 2 : 0) + (recentDeepDiscount ? 2 : 0) + (recentBullFibTouch ? 2 : 0) + (recentEqualLowSweep ? 2 : 0) + (recentBullReversal ? 2 : 0) + (recentBullWtCross ? 2 : 0) + (bullishBOS ? 2 : 0) + (wtIsOversold ? 1 : 0) + (bullMomentumCandle ? 1 : 0) + (h1BullFvg ? 1 : 0)
+counterSellScore = (recentBullishContext ? 2 : 0) + (recentHighPremium ? 2 : 0) + (recentBearFibTouch ? 2 : 0) + (recentEqualHighSweep ? 2 : 0) + (recentBearReversal ? 2 : 0) + (recentBearWtCross ? 2 : 0) + (bearishBOS ? 2 : 0) + (wtIsOverbought ? 1 : 0) + (bearMomentumCandle ? 1 : 0) + (h1BearFvg ? 1 : 0)
+sidewaysBuyScore = (sidewaysRegime ? 2 : 0) + (recentDeepDiscount ? 2 : 0) + (recentBullFibTouch ? 2 : 0) + (recentEqualLowSweep ? 2 : 0) + (recentBullReversal ? 2 : 0) + (recentBullWtCross ? 2 : 0) + (bullishBOS ? 2 : 0) + (wtIsOversold ? 1 : 0) + (bullMomentumCandle ? 1 : 0) + (h1BullFvg ? 1 : 0)
+sidewaysSellScore = (sidewaysRegime ? 2 : 0) + (recentHighPremium ? 2 : 0) + (recentBearFibTouch ? 2 : 0) + (recentEqualHighSweep ? 2 : 0) + (recentBearReversal ? 2 : 0) + (recentBearWtCross ? 2 : 0) + (bearishBOS ? 2 : 0) + (wtIsOverbought ? 1 : 0) + (bearMomentumCandle ? 1 : 0) + (h1BearFvg ? 1 : 0)
+
+trendBullFibPassed = not requireTrendFib or bullFibTouch
+trendBearFibPassed = not requireTrendFib or bearFibTouch
+
+// Entry gate uses minTradeScore so low-confidence 1-leg trades can still fire.
+normalBullCandidate = barstate.isconfirmed and chartTimeframeAllowed and confirmedBullishRegime and inDiscount and wtBullDirection and (strongBullCandle or equalLowSweep) and bullScore >= minTradeScore and trendBullFibPassed and emaBullAligned
+normalBearCandidate = barstate.isconfirmed and chartTimeframeAllowed and confirmedBearishRegime and inPremium and wtBearDirection and (strongBearCandle or equalHighSweep) and bearScore >= minTradeScore and trendBearFibPassed and emaBearAligned
+
+countertrendBuyCandidate = barstate.isconfirmed and chartTimeframeAllowed and enableCountertrendTrades and recentBearishContext and counterBullShiftPassed and bullishBOS and counterBuyScore >= minTradeScore and emaBullAligned
+countertrendSellCandidate = barstate.isconfirmed and chartTimeframeAllowed and enableCountertrendTrades and recentBullishContext and counterBearShiftPassed and bearishBOS and counterSellScore >= minTradeScore and emaBearAligned
+
+sidewaysBuyCandidate = barstate.isconfirmed and chartTimeframeAllowed and enableSidewaysTrades and sidewaysRegime and sidewaysBullBiasAllowed and bullishBOS and sidewaysBuyScore >= minTradeScore and emaBullAligned
+sidewaysSellCandidate = barstate.isconfirmed and chartTimeframeAllowed and enableSidewaysTrades and sidewaysRegime and sidewaysBearBiasAllowed and bearishBOS and sidewaysSellScore >= minTradeScore and emaBearAligned
+
+candidateLong = normalBullCandidate or countertrendBuyCandidate or sidewaysBuyCandidate
+candidateShort = normalBearCandidate or countertrendSellCandidate or sidewaysSellCandidate
+longSignal = candidateLong and not candidateShort and not candidateLong[1]
+shortSignal = candidateShort and not candidateLong and not candidateShort[1]
+
+longScore = countertrendBuyCandidate ? counterBuyScore : sidewaysBuyCandidate ? sidewaysBuyScore : bullScore
+shortScore = countertrendSellCandidate ? counterSellScore : sidewaysSellCandidate ? sidewaysSellScore : bearScore
+longFullRisk = countertrendBuyCandidate ? counterRiskPct : sidewaysBuyCandidate ? sidewaysRiskPct : fullRiskPct
+shortFullRisk = countertrendSellCandidate ? counterRiskPct : sidewaysSellCandidate ? sidewaysRiskPct : fullRiskPct
+
+f_legs(score) =>
+    score >= highLegsScore ? 3 : score >= mediumLegsScore ? 2 : score >= minTradeScore ? 1 : 0
+
+longLegs = f_legs(longScore)
+shortLegs = f_legs(shortScore)
+
+atrValue = ta.atr(atrLength)
+stopDistance = atrValue * atrStopMultiplier
+
+// Absolute prices from signal close (fill proxy). Robot validates vs broker entry.
+longSl = close - stopDistance
+longTp1 = close + stopDistance * tp1Multiple
+longTp2 = close + stopDistance * tp2Multiple
+longTp3 = close + stopDistance * tp3Multiple
+shortSl = close + stopDistance
+shortTp1 = close - stopDistance * tp1Multiple
+shortTp2 = close - stopDistance * tp2Multiple
+shortTp3 = close - stopDistance * tp3Multiple
+
+// Clean symbol for robot MARKET_MAP / cTrader (strip slash / common suffixes).
+rawTicker = str.upper(str.replace_all(syminfo.ticker, "/", ""))
+symClean = str.replace_all(str.replace_all(str.replace_all(rawTicker, ".P", ""), "PERP", ""), "!", "")
+
+f_alert_json(act, score, riskPct, legs, slP, tp1P, tp2P, tp3P) =>
+    base = '{"pass":"' + webhookPass + '","sym":"' + symClean + '","action":"' + act + '","strategy":"Scalp","score":' + str.tostring(score) + ',"risk":' + str.tostring(riskPct, "#.####") + ',"legs":' + str.tostring(legs) + ',"sl":' + str.tostring(slP, "#.########") + ',"tp1":' + str.tostring(tp1P, "#.########")
+    with2 = legs >= 2 ? base + ',"tp2":' + str.tostring(tp2P, "#.########") : base
+    with3 = legs >= 3 ? with2 + ',"tp3":' + str.tostring(tp3P, "#.########") : with2
+    with3 + ',"bar_time":"' + str.tostring(time) + '"}'
+
+if longSignal and longLegs > 0 and not na(stopDistance) and stopDistance > 0
+    riskPct = longFullRisk * longLegs / 3.0
+    msg = f_alert_json("buy", longScore, riskPct, longLegs, longSl, longTp1, longTp2, longTp3)
+    alert(msg, alert.freq_once_per_bar)
+    label.new(bar_index, low, "BUY L" + str.tostring(longLegs) + " s" + str.tostring(longScore), style=label.style_label_up, color=color.new(color.green, 20), textcolor=color.white, size=size.small)
+
+if shortSignal and shortLegs > 0 and not na(stopDistance) and stopDistance > 0
+    riskPct = shortFullRisk * shortLegs / 3.0
+    msg = f_alert_json("sell", shortScore, riskPct, shortLegs, shortSl, shortTp1, shortTp2, shortTp3)
+    alert(msg, alert.freq_once_per_bar)
+    label.new(bar_index, high, "SELL L" + str.tostring(shortLegs) + " s" + str.tostring(shortScore), style=label.style_label_down, color=color.new(color.red, 20), textcolor=color.white, size=size.small)
+
+plot(h1Ema10, "Fast HTF EMA10", color=color.new(color.teal, 30))
+plot(h1Ema23, "Fast HTF EMA23", color=color.new(color.orange, 30))
+plotshape(longSignal and longLegs > 0, title="Buy", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)
+plotshape(shortSignal and shortLegs > 0, title="Sell", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
+
+var table info = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 70))
+if barstate.islast
+    table.cell(info, 0, 0, "Scalp Live v5", text_color=color.white)
+    table.cell(info, 1, 0, chartTimeframeAllowed ? "TF OK" : "WRONG TF", text_color=chartTimeframeAllowed ? color.lime : color.red)
+    table.cell(info, 0, 1, "Bull score", text_color=color.gray)
+    table.cell(info, 1, 1, str.tostring(bullScore), text_color=color.white)
+    table.cell(info, 0, 2, "Bear score", text_color=color.gray)
+    table.cell(info, 1, 2, str.tostring(bearScore), text_color=color.white)
+    table.cell(info, 0, 3, "EMA gate", text_color=color.gray)
+    table.cell(info, 1, 3, emaBullAligned ? "BULL" : emaBearAligned ? "BEAR" : "FLAT", text_color=color.white)
+    table.cell(info, 0, 4, "Regime", text_color=color.gray)
+    table.cell(info, 1, 4, confirmedBullishRegime ? "BULL" : confirmedBearishRegime ? "BEAR" : "SIDE", text_color=color.white)
+    table.cell(info, 0, 5, "Tiers", text_color=color.gray)
+    table.cell(info, 1, 5, str.tostring(minTradeScore) + "/" + str.tostring(mediumLegsScore) + "/" + str.tostring(highLegsScore), text_color=color.white)

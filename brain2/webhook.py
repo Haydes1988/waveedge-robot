@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""WaveEdge live execution gateway v4.0.
+"""WaveEdge live execution gateway v5.0.
 
-One approved setup opens one coordinated three-position race. All legs share
-the broker entry and stop, have progressive TP1/TP2/TP3 objectives, and split
-one account-level risk budget into three equal thirds.
+One approved setup opens a coordinated race of 1, 2, or 3 legs based on
+signal confidence (`legs` in the alert JSON). All legs share the broker
+entry and stop. Risk weights: 1 leg = 100%; 2 legs = 50/50; 3 legs =
+equal thirds. When `legs` is set below 3, missing higher TPs are NOT
+invented into a full 3-leg fallback. Legacy alerts with no `legs` field
+still get the old complete 3-leg ladder when tp3 is absent.
 """
 
 import hashlib
@@ -42,6 +45,31 @@ RISK_WEIGHTS = (1 / 3, 1 / 3, 1 / 3)
 FALLBACK_TP_RS = (1.0, 2.0, 3.5)
 MIN_TP_RS = (0.8, 1.5, 2.0)
 BASE_MIN_SCORES = {"Scalp": 7, "Day": 7, "Swing": 8}
+
+
+def risk_weights_for(n_legs):
+    """Split one account-level risk budget across the active race legs."""
+    if n_legs == 1:
+        return (1.0,)
+    if n_legs == 2:
+        return (0.5, 0.5)
+    if n_legs == 3:
+        return RISK_WEIGHTS
+    raise ValueError("legs must be 1, 2, or 3")
+
+
+def resolve_leg_count(data, supplied_targets):
+    """Prefer explicit `legs`. Legacy alerts (no legs) stay on the 3-leg path."""
+    raw = data.get("legs", data.get("race_legs"))
+    if raw not in (None, ""):
+        n = int(as_number(raw, "legs"))
+        if n not in (1, 2, 3):
+            raise ValueError("legs must be 1, 2, or 3")
+        return n
+    # Legacy chart alerts: always a three-leg race (normalize_targets may
+    # invent the full 1R/2R/3.5R ladder when tp3 is missing).
+    return 3
+
 
 MARKET_MAP = {
     "EURUSD": {"id": 401484347, "name": "EUR/USD", "pip": 0.0001, "usd_quote": True},
@@ -261,29 +289,40 @@ def open_position_counts(api, market_id):
     return len(positions), len(same)
 
 
-def normalize_targets(entry, sl, action, supplied):
+def normalize_targets(entry, sl, action, supplied, n_legs=3):
+    """Build TP prices for exactly n_legs.
+
+    n_legs == 3 and tp3 missing → legacy full 1R/2R/3.5R ladder (old charts).
+    n_legs in (1, 2) → intentional partial race: only fill/validate that many
+    targets; never invent a 3rd leg.
+    """
     risk = abs(entry - sl)
     if risk <= 0:
         raise ValueError("Stop loss equals entry")
+    if n_legs not in (1, 2, 3):
+        raise ValueError("legs must be 1, 2, or 3")
     sign = 1 if action == "buy" else -1
-    fallback = [entry + sign * risk * r for r in FALLBACK_TP_RS]
-    # Old chart alerts only carried TP1/TP2. Mixing those legacy targets with a
-    # newly-derived TP3 would make live execution disagree with the v5 backtest.
-    # Until the chart sends all three, use the complete canonical ladder.
-    if len(supplied) < 3 or not supplied[2]:
-        return fallback
+    fallback_full = [entry + sign * risk * r for r in FALLBACK_TP_RS]
+
+    # Legacy three-leg path: incomplete tp3 means invent the whole ladder.
+    if n_legs == 3 and (len(supplied) < 3 or not supplied[2]):
+        return list(fallback_full)
+
     targets = []
     previous_r = 0.0
-    for index, raw in enumerate(supplied):
-        candidate = raw if raw and math.isfinite(raw) else fallback[index]
+    for index in range(n_legs):
+        raw = supplied[index] if index < len(supplied) else None
+        candidate = raw if raw and math.isfinite(raw) else fallback_full[index]
         r_value = sign * (candidate - entry) / risk
         if r_value < MIN_TP_RS[index] or r_value <= previous_r:
-            candidate = fallback[index]
+            candidate = fallback_full[index]
             r_value = FALLBACK_TP_RS[index]
         targets.append(candidate)
         previous_r = r_value
-    if not (targets[0] * sign < targets[1] * sign < targets[2] * sign):
-        targets = fallback
+    if n_legs >= 2:
+        ordered = all(targets[i] * sign < targets[i + 1] * sign for i in range(n_legs - 1))
+        if not ordered:
+            targets = list(fallback_full[:n_legs])
     return targets
 
 
@@ -378,7 +417,7 @@ def route_to_ctrader(symbol, action, risk_pct, sl_price, targets):
             "symbol": symbol, "action": action, "ctrader_job_id": job_id, "legs": []}
 
 
-def place_race(symbol, action, risk_pct, sl_price, supplied_targets):
+def place_race(symbol, action, risk_pct, sl_price, supplied_targets, n_legs=3):
     market = MARKET_MAP[symbol]
     daily_pnl, _ = get_daily_pnl()
     if daily_pnl <= -DAILY_LOSS_LIMIT:
@@ -392,10 +431,12 @@ def place_race(symbol, action, risk_pct, sl_price, supplied_targets):
         total_open, symbol_open = open_position_counts(api, market["id"])
     except Exception as exc:
         return blocked("broker_unavailable", str(exc), symbol, action)
-    if symbol_open + 3 > MAX_POSITIONS_PER_SYMBOL:
-        return blocked("position_limit_symbol", "A complete three-leg race will not fit", symbol, action)
-    if total_open + 3 > MAX_TOTAL_POSITIONS:
-        return blocked("position_limit_total", "A complete three-leg race will not fit", symbol, action)
+    if n_legs not in (1, 2, 3):
+        return blocked("invalid_legs", "legs must be 1, 2, or 3", symbol, action)
+    if symbol_open + n_legs > MAX_POSITIONS_PER_SYMBOL:
+        return blocked("position_limit_symbol", f"A {n_legs}-leg race will not fit", symbol, action)
+    if total_open + n_legs > MAX_TOTAL_POSITIONS:
+        return blocked("position_limit_total", f"A {n_legs}-leg race will not fit", symbol, action)
 
     try:
         entry = extract_price(api.get_prices(market_id=market["id"], num_ticks=1), action)
@@ -404,14 +445,15 @@ def place_race(symbol, action, risk_pct, sl_price, supplied_targets):
             sl_price = entry - DEFAULT_SL_PIPS * pip if action == "buy" else entry + DEFAULT_SL_PIPS * pip
         if (action == "buy" and sl_price >= entry) or (action == "sell" and sl_price <= entry):
             raise ValueError("Stop loss is on the wrong side of broker entry")
-        targets = normalize_targets(entry, sl_price, action, supplied_targets)
+        targets = normalize_targets(entry, sl_price, action, supplied_targets, n_legs=n_legs)
     except Exception as exc:
         return blocked("invalid_levels", str(exc), symbol, action)
 
     total_risk = ACCOUNT_BALANCE * risk_pct / 100.0
+    weights = risk_weights_for(n_legs)
     prepared = []
     try:
-        for index, (weight, target) in enumerate(zip(RISK_WEIGHTS, targets), start=1):
+        for index, (weight, target) in enumerate(zip(weights, targets), start=1):
             quantity, actual_risk = quantity_for_risk(total_risk * weight, entry, sl_price, market)
             prepared.append({"position": index, "weight": weight, "tp": target,
                              "quantity": quantity, "risk_dollars": actual_risk})
@@ -437,13 +479,13 @@ def place_race(symbol, action, risk_pct, sl_price, supplied_targets):
     executed = [leg for leg in legs if leg["executed"]]
     if executed:
        record_active_race(symbol, action, entry, sl_price, legs)
-    complete = len(executed) == 3
+    complete = len(executed) == n_legs
     stage = None if complete else ("partial_execution" if executed else "broker_rejected")
-    reason = None if complete else f"{len(executed)}/3 race legs executed"
-    log(f"RACE {symbol} {action.upper()}: {len(executed)}/3 legs executed; entry {entry}, SL {sl_price}")
+    reason = None if complete else f"{len(executed)}/{n_legs} race legs executed"
+    log(f"RACE {symbol} {action.upper()}: {len(executed)}/{n_legs} legs executed; entry {entry}, SL {sl_price}")
     return {"executed": bool(executed), "race_complete": complete, "block_stage": stage,
             "block_reason": reason, "symbol": symbol, "action": action,
-            "entry_price": entry, "sl": sl_price, "legs": legs,
+            "entry_price": entry, "sl": sl_price, "legs": legs, "race_size": n_legs,
             "risk_dollars": round(sum(x["risk_dollars"] for x in executed), 2)}
 
 
@@ -471,6 +513,7 @@ def webhook():
         risk_pct = min(max(as_number(data.get("risk", 1.0), "risk"), 0.0), MAX_RISK_PCT)
         sl = as_number(data.get("sl", 0), "sl")
         targets = [as_number(data.get(f"tp{i}", 0), f"tp{i}") for i in (1, 2, 3)]
+        n_legs = resolve_leg_count(data, targets)
 
         if action not in ("buy", "sell"):
             raise ValueError("action must be buy or sell")
@@ -503,7 +546,7 @@ def webhook():
         if context_error:
             reason = context_error + "; execution fails closed"
             approved = False
-        result = (place_race(symbol, action, risk_pct, sl, targets) if approved
+        result = (place_race(symbol, action, risk_pct, sl, targets, n_legs=n_legs) if approved
                   else blocked("brain3_reject", reason, symbol, action))
 
         now = utcnow().isoformat()
@@ -515,7 +558,7 @@ def webhook():
                     "timestamp": now, "signal_id": key, "strategy": strategy,
                     "symbol": symbol, "action": action, "score": score,
                     "risk_pct": risk_pct, "risk_weight": leg["weight"],
-                    "race_position": leg["position"], "race_size": 3,
+                    "race_position": leg["position"], "race_size": result.get("race_size", n_legs),
                     "entry_price": result["entry_price"], "sl": result["sl"],
                     "tp1": leg["tp"], "tp": leg["tp"],
                     "risk_dollars": leg["risk_dollars"],
@@ -535,7 +578,8 @@ def webhook():
                 "outcome_checked": False,
             })
 
-        signal_status = ("executed_three_leg_race" if result.get("race_complete") else
+        raced = result.get("race_size", n_legs)
+        signal_status = (f"executed_{raced}_leg_race" if result.get("race_complete") else
                          f"blocked_{result.get('block_stage')}" if not result.get("executed") else
                          "partial_execution")
         return jsonify({"status": "ok", "approved": approved, "reason": reason,
@@ -554,8 +598,9 @@ def health():
     daily_pnl, _ = get_daily_pnl()
     context, error = read_market_context()
     return jsonify({
-        "status": "WaveEdge running", "version": "4.0",
-        "execution_model": "three_position_race", "risk_weights": RISK_WEIGHTS,
+        "status": "WaveEdge running", "version": "5.0",
+        "execution_model": "confidence_tiered_race", "risk_weights": RISK_WEIGHTS,
+        "leg_weights": {"1": [1.0], "2": [0.5, 0.5], "3": list(RISK_WEIGHTS)},
         "pairs": list(MARKET_MAP), "daily_realized_pnl": daily_pnl,
         "total_realized_pnl": get_total_pnl(), "daily_loss_limit": DAILY_LOSS_LIMIT,
         "realized_drawdown": get_realized_drawdown(),
@@ -585,5 +630,5 @@ def positions():
 
 
 if __name__ == "__main__":
-    log("WaveEdge webhook v4.0 starting — three-position race, fail-closed")
+    log("WaveEdge webhook v5.0 starting — confidence-tiered 1/2/3-leg race, fail-closed")
     app.run(host="0.0.0.0", port=int(os.getenv("WAVEEDGE_PORT", "80")), debug=False)
