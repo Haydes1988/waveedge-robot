@@ -20,8 +20,7 @@
 indicator("WaveEdge Scalp Live Alert v5", overlay=true, max_bars_back=1000)
 
 // ---- Inputs ----
-webhookPass = input.string("REPLACE_WITH_PASSPHRASE", "Webhook Passphrase", group="Webhook",
-     tooltip="Must match WAVEEDGE_WEBHOOK_PASSPHRASE on the server.")
+webhookPass = input.string("REPLACE_WITH_PASSPHRASE", "Webhook Passphrase", group="Webhook", tooltip="Must match WAVEEDGE_WEBHOOK_PASSPHRASE on the server.")
 fibLookback = input.int(60, "HTF Fibonacci Lookback", minval=10, group="Structure")
 rangeLookback = input.int(30, "HTF Entry Range Lookback", minval=10, group="Structure")
 fibBufferPct = input.float(0.00075, "Fibonacci Buffer Percentage", minval=0.0, step=0.00005, group="Structure")
@@ -41,8 +40,7 @@ waveTrendOversold = input.float(-53.0, "WaveTrend Oversold", group="WaveTrend")
 waveTrendOverbought = input.float(53.0, "WaveTrend Overbought", group="WaveTrend")
 bodyAverageLength = input.int(20, "Average Candle Body Length", minval=2, group="Candles")
 
-minTradeScore = input.int(7, "Min Trade Score (1 leg floor)", minval=1, maxval=18, group="Confidence Tiers",
-     tooltip="Below this: no alert. At/above and below medium: 1 leg.")
+minTradeScore = input.int(7, "Min Trade Score (1 leg floor)", minval=1, maxval=18, group="Confidence Tiers", tooltip="Below this: no alert. At/above and below medium: 1 leg.")
 mediumLegsScore = input.int(9, "Medium Score (≥ → 2 legs)", minval=1, maxval=18, group="Confidence Tiers")
 highLegsScore = input.int(11, "High Score (≥ → 3 legs)", minval=1, maxval=18, group="Confidence Tiers")
 requireTrendFib = input.bool(false, "Require Fib for Trend Trades", group="Filters")
@@ -53,8 +51,7 @@ enforceChartTimeframe = input.bool(true, "Require 5-Minute Chart", group="Filter
 tp1Multiple = input.float(1.0, "TP1 R Multiple", minval=0.25, step=0.25, group="Targets")
 tp2Multiple = input.float(2.0, "TP2 R Multiple", minval=0.50, step=0.25, group="Targets")
 tp3Multiple = input.float(3.0, "TP3 R Multiple", minval=0.75, step=0.25, group="Targets")
-fullRiskPct = input.float(0.6, "Full (3-leg) Total Risk %", minval=0.01, step=0.05, group="Risk",
-     tooltip="Actual risk sent = fullRiskPct * legs / 3. Robot also caps at MAX_RISK_PCT.")
+fullRiskPct = input.float(0.6, "Full (3-leg) Total Risk %", minval=0.01, step=0.05, group="Risk", tooltip="Actual risk sent = fullRiskPct * legs / 3. Robot also caps at MAX_RISK_PCT.")
 counterRiskPct = input.float(0.35, "Countertrend Full Risk %", minval=0.01, step=0.05, group="Risk")
 sidewaysRiskPct = input.float(0.35, "Sideways Full Risk %", minval=0.01, step=0.05, group="Risk")
 
