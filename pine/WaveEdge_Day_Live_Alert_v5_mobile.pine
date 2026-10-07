@@ -234,11 +234,7 @@ z172 = close - z182 * z187
 z173 = close - z182 * z188
 z150 = str.upper(str.replace_all(syminfo.ticker, "/", ""))
 z185 = str.replace_all(str.replace_all(str.replace_all(z150, ".P", ""), "PERP", ""), "!", "")
-f_alert_json(act, score, riskPct, legs, slP, tp1P, tp2P, tp3P) =>
-    base = '{"pass":"' + z198 + '","sym":"' + z185 + '","action":"' + act + '","strategy":"Day","score":' + str.tostring(score) + ',"risk":' + str.tostring(riskPct, "#.####") + ',"legs":' + str.tostring(legs) + ',"sl":' + str.tostring(slP, "#.########") + ',"tp1":' + str.tostring(tp1P, "#.########")
-    with2 = legs >= 2 ? base + ',"tp2":' + str.tostring(tp2P, "#.########") : base
-    with3 = legs >= 3 ? with2 + ',"tp3":' + str.tostring(tp3P, "#.########") : with2
-    with3 + ',"bar_time":"' + str.tostring(time) + '"}'
+f_alert_json(act, score, riskPct, legs, slP, tp1P, tp2P, tp3P) => (legs >= 3 ? (legs >= 2 ? ('{"pass":"' + z198 + '","sym":"' + z185 + '","action":"' + act + '","strategy":"Day","score":' + str.tostring(score) + ',"risk":' + str.tostring(riskPct, "#.####") + ',"legs":' + str.tostring(legs) + ',"sl":' + str.tostring(slP, "#.########") + ',"tp1":' + str.tostring(tp1P, "#.########")) + ',"tp2":' + str.tostring(tp2P, "#.########") : ('{"pass":"' + z198 + '","sym":"' + z185 + '","action":"' + act + '","strategy":"Day","score":' + str.tostring(score) + ',"risk":' + str.tostring(riskPct, "#.####") + ',"legs":' + str.tostring(legs) + ',"sl":' + str.tostring(slP, "#.########") + ',"tp1":' + str.tostring(tp1P, "#.########"))) + ',"tp3":' + str.tostring(tp3P, "#.########") : (legs >= 2 ? ('{"pass":"' + z198 + '","sym":"' + z185 + '","action":"' + act + '","strategy":"Day","score":' + str.tostring(score) + ',"risk":' + str.tostring(riskPct, "#.####") + ',"legs":' + str.tostring(legs) + ',"sl":' + str.tostring(slP, "#.########") + ',"tp1":' + str.tostring(tp1P, "#.########")) + ',"tp2":' + str.tostring(tp2P, "#.########") : ('{"pass":"' + z198 + '","sym":"' + z185 + '","action":"' + act + '","strategy":"Day","score":' + str.tostring(score) + ',"risk":' + str.tostring(riskPct, "#.####") + ',"legs":' + str.tostring(legs) + ',"sl":' + str.tostring(slP, "#.########") + ',"tp1":' + str.tostring(tp1P, "#.########")))) + ',"bar_time":"' + str.tostring(time) + '"}'
 if z134 and z132 > 0 and not na(z182) and z182 > 0
     riskPct = z131 * z132 / 3.0
     msg = f_alert_json("buy", z133, riskPct, z132, longSl, z135, z136, z137)
