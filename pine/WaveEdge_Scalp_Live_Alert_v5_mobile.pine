@@ -1,269 +1,269 @@
 //@version=5
-z177("WaveEdge Scalp Live Alert v5", overlay=true, max_bars_back=1000)
-z133 = input.string("REPLACE_WITH_PASSPHRASE", "Webhook Passphrase", group="Webhook")
-z127 = input.int(60, "HTF Fibonacci Lookback", minval=10, group="Structure")
-z107 = input.int(30, "HTF Entry Range Lookback", minval=10, group="Structure")
-z116 = input.float(0.00075, "Fibonacci Buffer Percentage", minval=0.0, step=0.00005, group="Structure")
-z128 = input.int(10, "EQH/EQL Pivot Length", minval=2, group="Structure")
-z85 = input.float(0.0010, "EQH/EQL Percentage Tolerance", minval=0.0001, step=0.0001, group="Structure")
-z182 = input.int(14, "ADX Length", minval=2, group="Regime")
-z155 = input.float(16.0, "Minimum Fast-HTF ADX", minval=1.0, step=0.5, group="Regime")
-z167 = input.int(14, "ATR Length", minval=1, group="Risk")
-z63 = input.float(1.2, "ATR Stop Multiplier", minval=0.1, step=0.1, group="Risk")
-z130 = input.int(8, "Break-of-Structure Lookback", minval=2, group="Structure")
-z106 = input.int(12, "Countertrend Confirmation Window", minval=1, group="Filters")
-z80 = input.int(5, "WaveTrend Cross Window", minval=1, group="WaveTrend")
-z10 = input.int(10, "WaveTrend Channel Length", minval=1, group="WaveTrend")
-z14 = input.int(21, "WaveTrend Average Length", minval=1, group="WaveTrend")
-z17 = input.int(4, "WaveTrend Signal Smoothing", minval=1, group="WaveTrend")
-z58 = input.float(-53.0, "WaveTrend Oversold", group="WaveTrend")
-z34 = input.float(53.0, "WaveTrend Overbought", group="WaveTrend")
-z59 = input.int(20, "Average Candle Body Length", minval=2, group="Candles")
-z108 = input.int(7, "Min Trade Score (1 leg floor)", minval=1, maxval=18, group="Confidence Tiers")
-z82 = input.int(9, "Medium Score (≥ → 2 legs)", minval=1, maxval=18, group="Confidence Tiers")
-z102 = input.int(11, "High Score (≥ → 3 legs)", minval=1, maxval=18, group="Confidence Tiers")
-z76 = input.bool(false, "Require Fib for Trend Trades", group="Filters")
-z1 = input.bool(false, "Enable Countertrend Trades", group="Filters")
-z25 = input.bool(false, "Enable Sideways Trades", group="Filters")
-z38 = input.bool(true, "Require Fast-HTF Shift for Countertrend", group="Filters")
-z16 = input.bool(true, "Require 5-Minute Chart", group="Filters")
-z129 = input.float(1.0, "TP1 R Multiple", minval=0.25, step=0.25, group="Targets")
-z126 = input.float(2.0, "TP2 R Multiple", minval=0.50, step=0.25, group="Targets")
-z125 = input.float(3.0, "TP3 R Multiple", minval=0.75, step=0.25, group="Targets")
-z136 = input.float(0.6, "Full (3-leg) Total Risk %", minval=0.01, step=0.05, group="Risk")
-z95 = input.float(0.35, "Countertrend Full Risk %", minval=0.01, step=0.05, group="Risk")
-z79 = input.float(0.35, "Sideways Full Risk %", minval=0.01, step=0.05, group="Risk")
-z21 = timeframe.period == "5"
-z22 = not z16 or z21
-z149 = request.security(syminfo.tickerid, "240", close[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-z157 = request.security(syminfo.tickerid, "240", ta.ema(close, 20)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-z161 = request.security(syminfo.tickerid, "240", ta.ema(close, 50)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-z212 = request.security(syminfo.tickerid, "60", close[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-z210 = request.security(syminfo.tickerid, "60", ta.ema(close, 20)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-z202 = request.security(syminfo.tickerid, "60", ta.ema(close, 50)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-z198 = request.security(syminfo.tickerid, "60", ta.rma(ta.change(high) > -ta.change(low) and ta.change(high) > 0 ? ta.change(high) : 0, z182)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-z183 = request.security(syminfo.tickerid, "60", ta.rma(-ta.change(low) > ta.change(high) and -ta.change(low) > 0 ? -ta.change(low) : 0, z182)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-z119 = request.security(syminfo.tickerid, "60", ta.rma(ta.tr(true), z182)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-z199 = request.security(syminfo.tickerid, "15", close[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-z201 = request.security(syminfo.tickerid, "15", ta.ema(close, 20)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-z211 = request.security(syminfo.tickerid, "15", ta.ema(close, 50)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-z83 = request.security(syminfo.tickerid, "15", ta.ema(close, 20)[2], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-z200 = request.security(syminfo.tickerid, "15", ta.ema(close, 10)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-z208 = request.security(syminfo.tickerid, "15", ta.ema(close, 23)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-z192 = request.security(syminfo.tickerid, "15", ta.rma(ta.change(high) > -ta.change(low) and ta.change(high) > 0 ? ta.change(high) : 0, z182)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-z186 = request.security(syminfo.tickerid, "15", ta.rma(-ta.change(low) > ta.change(high) and -ta.change(low) > 0 ? -ta.change(low) : 0, z182)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-z121 = request.security(syminfo.tickerid, "15", ta.rma(ta.tr(true), z182)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-h1Adx = request.security(syminfo.tickerid, "15", ta.rma(100 * math.abs(ta.rma(ta.change(high) > -ta.change(low) and ta.change(high) > 0 ? ta.change(high) : 0, z182) - ta.rma(-ta.change(low) > ta.change(high) and -ta.change(low) > 0 ? -ta.change(low) : 0, z182)) / math.max(ta.rma(ta.change(high) > -ta.change(low) and ta.change(high) > 0 ? ta.change(high) : 0, z182) + ta.rma(-ta.change(low) > ta.change(high) and -ta.change(low) > 0 ? -ta.change(low) : 0, z182), 0.0000001), z182)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-z135 = request.security(syminfo.tickerid, "15", ta.highest(high, z127)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-z145 = request.security(syminfo.tickerid, "15", ta.lowest(low, z127)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-z131 = request.security(syminfo.tickerid, "15", ta.highest(high, z107)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-z150 = request.security(syminfo.tickerid, "15", ta.lowest(low, z107)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-z174 = request.security(syminfo.tickerid, "15", low[1] > high[3], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-z180 = request.security(syminfo.tickerid, "15", high[1] < low[3], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-z187 = z119 > 0 ? 100 * z198 / z119 : 0
-z171 = z119 > 0 ? 100 * z183 / z119 : 0
-z197 = z121 > 0 ? 100 * z192 / z121 : 0
-z170 = z121 > 0 ? 100 * z186 / z121 : 0
-z110 = z149 > z157 and z157 > z161
-z113 = z149 < z157 and z157 < z161
-z173 = z212 > z210 and z210 > z202 and z187 > z171
-z163 = z212 < z210 and z210 < z202 and z171 > z187
-z176 = z199 > z201 and z201 > z211 and z197 > z170
-z168 = z199 < z201 and z201 < z211 and z170 > z197
-z11 = z110 and z173 and z176 and h1Adx >= z155
-z13 = z113 and z163 and z168 and h1Adx >= z155
-z90 = not z11 and not z13
-z91 = z200 > z208
-z84 = z200 < z208
-z88 = z13 or (z113 and z163) or (z163 and z168)
-z86 = z11 or (z110 and z173) or (z173 and z176)
-z5 = ta.barssince(z88)
-z7 = ta.barssince(z86)
-z29 = z88 or (not na(z5) and z5 <= z106)
-z31 = z86 or (not na(z7) and z7 <= z106)
-z132 = z199 > z201 or z197 > z170 or z201 > z83
-z139 = z199 < z201 or z170 > z197 or z201 < z83
-z8 = not z38 or z132
-z12 = not z38 or z139
-z3 = not (z113 and z163) and not (z163 and z168)
-z6 = not (z110 and z173) and not (z173 and z176)
-z209 = z131 - z150
-z142 = z150 + z209 * 0.50
-z40 = z150 + z209 * 0.25
-z41 = z150 + z209 * 0.75
-z112 = not na(z131) and not na(z150) and z131 > z150
-z160 = z112 and close <= z142
-z181 = z112 and close >= z142
-z89 = z112 and close <= z40
-z103 = z112 and close >= z41
-z144 = z135 - z145
-z143 = not na(z135) and not na(z145) and z135 > z145
-z75 = close * z116
-z178 = z135 - z144 * 0.50
-z141 = z135 - z144 * 0.618
-z146 = math.min(z178, z141) - z75
-z124 = math.max(z178, z141) + z75
-z166 = z145 + z144 * 0.50
-z148 = z145 + z144 * 0.618
-z158 = math.min(z166, z148) - z75
-z120 = math.max(z166, z148) + z75
-z115 = z143 and low <= z124 and high >= z146
-z118 = z143 and high >= z158 and low <= z120
-z184 = ta.pivothigh(high, z128, z128)
-z191 = ta.pivotlow(low, z128, z128)
-z77 = ta.valuewhen(not na(z184), z184, 0)
-z97 = ta.valuewhen(not na(z191), z191, 0)
-z61 = ta.valuewhen(not na(z184), z184, 1)
-z67 = ta.valuewhen(not na(z191), z191, 1)
-z47 = not na(z77) and not na(z61) ? math.abs((z77 + z61) / 2) : na
-z60 = not na(z97) and not na(z67) ? math.abs((z97 + z67) / 2) : na
-z30 = not na(z47) and z47 > 0 ? math.abs(z77 - z61) / z47 : na
-z36 = not na(z60) and z60 > 0 ? math.abs(z97 - z67) / z60 : na
-z64 = not na(z30) and z30 <= z85
-z68 = not na(z36) and z36 <= z85
-z93 = z64 ? math.max(z77, z61) : na
-z101 = z68 ? math.min(z97, z67) : na
-z94 = z64 and high > z93 and close < z93
-z99 = z68 and low < z101 and close > z101
-z81 = ta.ema(hlc3, z10)
-z138 = ta.ema(math.abs(hlc3 - z81), z10)
-z122 = z138 > 0 ? (hlc3 - z81) / (0.015 * z138) : 0
-wtMain = ta.ema(z122, z14)
-z193 = ta.sma(wtMain, z17)
-z123 = ta.crossover(wtMain, z193)
-z140 = ta.crossunder(wtMain, z193)
-z72 = wtMain > z193
-z78 = wtMain < z193
-z111 = wtMain <= z58
-z92 = wtMain >= z34
-z154 = math.abs(close - open)
-z57 = ta.sma(z154, z59)
-z137 = high - low
-z162 = high - math.max(open, close)
-z165 = math.min(open, close) - low
-z87 = math.max(z154, syminfo.mintick)
+indicator("WaveEdge Scalp Live Alert v5", overlay=true, max_bars_back=1000)
+z198 = input.string("REPLACE_WITH_PASSPHRASE", "Webhook Passphrase", group="Webhook")
+z84 = input.int(60, "HTF Fibonacci Lookback", minval=10, group="Structure")
+z149 = input.int(30, "HTF Entry Range Lookback", minval=10, group="Structure")
+z83 = input.float(0.00075, "Fibonacci Buffer Percentage", minval=0.0, step=0.00005, group="Structure")
+z145 = input.int(10, "EQH/EQL Pivot Length", minval=2, group="Structure")
+z71 = input.float(0.0010, "EQH/EQL Percentage Tolerance", minval=0.0001, step=0.0001, group="Structure")
+z0 = input.int(14, "ADX Length", minval=2, group="Regime")
+z141 = input.float(16.0, "Minimum Fast-HTF ADX", minval=1.0, step=0.5, group="Regime")
+z1 = input.int(14, "ATR Length", minval=1, group="Risk")
+z2 = input.float(1.2, "ATR Stop Multiplier", minval=0.1, step=0.1, group="Risk")
+z31 = input.int(8, "Break-of-Structure Lookback", minval=2, group="Structure")
+z58 = input.int(12, "Countertrend Confirmation Window", minval=1, group="Filters")
+z197 = input.int(5, "WaveTrend Cross Window", minval=1, group="WaveTrend")
+z193 = input.int(10, "WaveTrend Channel Length", minval=1, group="WaveTrend")
+z192 = input.int(21, "WaveTrend Average Length", minval=1, group="WaveTrend")
+z196 = input.int(4, "WaveTrend Signal Smoothing", minval=1, group="WaveTrend")
+z195 = input.float(-53.0, "WaveTrend Oversold", group="WaveTrend")
+z194 = input.float(53.0, "WaveTrend Overbought", group="WaveTrend")
+z30 = input.int(20, "Average Candle Body Length", minval=2, group="Candles")
+z140 = input.int(7, "Min Trade Score (1 leg floor)", minval=1, maxval=18, group="Confidence Tiers")
+z139 = input.int(9, "Medium Score (≥ → 2 legs)", minval=1, maxval=18, group="Confidence Tiers")
+z124 = input.int(11, "High Score (≥ → 3 legs)", minval=1, maxval=18, group="Confidence Tiers")
+z164 = input.bool(false, "Require Fib for Trend Trades", group="Filters")
+z68 = input.bool(false, "Enable Countertrend Trades", group="Filters")
+z69 = input.bool(false, "Enable Sideways Trades", group="Filters")
+z163 = input.bool(true, "Require Fast-HTF Shift for Countertrend", group="Filters")
+z70 = input.bool(true, "Require 5-Minute Chart", group="Filters")
+z186 = input.float(1.0, "TP1 R Multiple", minval=0.25, step=0.25, group="Targets")
+z187 = input.float(2.0, "TP2 R Multiple", minval=0.50, step=0.25, group="Targets")
+z188 = input.float(3.0, "TP3 R Multiple", minval=0.75, step=0.25, group="Targets")
+z85 = input.float(0.6, "Full (3-leg) Total Risk %", minval=0.01, step=0.05, group="Risk")
+z56 = input.float(0.35, "Countertrend Full Risk %", minval=0.01, step=0.05, group="Risk")
+z179 = input.float(0.35, "Sideways Full Risk %", minval=0.01, step=0.05, group="Risk")
+z52 = timeframe.period == "5"
+z49 = not z70 or z52
+z63 = request.security(syminfo.tickerid, "240", close[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+z64 = request.security(syminfo.tickerid, "240", ta.ema(close, 20)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+z65 = request.security(syminfo.tickerid, "240", ta.ema(close, 50)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+z116 = request.security(syminfo.tickerid, "60", close[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+z117 = request.security(syminfo.tickerid, "60", ta.ema(close, 20)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+z118 = request.security(syminfo.tickerid, "60", ta.ema(close, 50)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+z122 = request.security(syminfo.tickerid, "60", ta.rma(ta.change(high) > -ta.change(low) and ta.change(high) > 0 ? ta.change(high) : 0, z0)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+z120 = request.security(syminfo.tickerid, "60", ta.rma(-ta.change(low) > ta.change(high) and -ta.change(low) > 0 ? -ta.change(low) : 0, z0)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+z123 = request.security(syminfo.tickerid, "60", ta.rma(ta.tr(true), z0)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+z92 = request.security(syminfo.tickerid, "15", close[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+z95 = request.security(syminfo.tickerid, "15", ta.ema(close, 20)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+z98 = request.security(syminfo.tickerid, "15", ta.ema(close, 50)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+z96 = request.security(syminfo.tickerid, "15", ta.ema(close, 20)[2], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+z94 = request.security(syminfo.tickerid, "15", ta.ema(close, 10)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+z97 = request.security(syminfo.tickerid, "15", ta.ema(close, 23)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+z106 = request.security(syminfo.tickerid, "15", ta.rma(ta.change(high) > -ta.change(low) and ta.change(high) > 0 ? ta.change(high) : 0, z0)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+z104 = request.security(syminfo.tickerid, "15", ta.rma(-ta.change(low) > ta.change(high) and -ta.change(low) > 0 ? -ta.change(low) : 0, z0)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+z113 = request.security(syminfo.tickerid, "15", ta.rma(ta.tr(true), z0)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+h1Adx = request.security(syminfo.tickerid, "15", ta.rma(100 * math.abs(ta.rma(ta.change(high) > -ta.change(low) and ta.change(high) > 0 ? ta.change(high) : 0, z0) - ta.rma(-ta.change(low) > ta.change(high) and -ta.change(low) > 0 ? -ta.change(low) : 0, z0)) / math.max(ta.rma(ta.change(high) > -ta.change(low) and ta.change(high) > 0 ? ta.change(high) : 0, z0) + ta.rma(-ta.change(low) > ta.change(high) and -ta.change(low) > 0 ? -ta.change(low) : 0, z0), 0.0000001), z0)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+z111 = request.security(syminfo.tickerid, "15", ta.highest(high, z84)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+z112 = request.security(syminfo.tickerid, "15", ta.lowest(low, z84)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+z108 = request.security(syminfo.tickerid, "15", ta.highest(high, z149)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+z109 = request.security(syminfo.tickerid, "15", ta.lowest(low, z149)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+z89 = request.security(syminfo.tickerid, "15", low[1] > high[3], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+z86 = request.security(syminfo.tickerid, "15", high[1] < low[3], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+z121 = z123 > 0 ? 100 * z122 / z123 : 0
+z119 = z123 > 0 ? 100 * z120 / z123 : 0
+z105 = z113 > 0 ? 100 * z106 / z113 : 0
+z103 = z113 > 0 ? 100 * z104 / z113 : 0
+z62 = z63 > z64 and z64 > z65
+z61 = z63 < z64 and z64 < z65
+z115 = z116 > z117 and z117 > z118 and z121 > z119
+z114 = z116 < z117 and z117 < z118 and z119 > z121
+z91 = z92 > z95 and z95 > z98 and z105 > z103
+z88 = z92 < z95 and z95 < z98 and z103 > z105
+z51 = z62 and z115 and z91 and h1Adx >= z141
+z50 = z61 and z114 and z88 and h1Adx >= z141
+z178 = not z51 and not z50
+z67 = z94 > z97
+z66 = z94 < z97
+z29 = z50 or (z61 and z114) or (z114 and z88)
+z44 = z51 or (z62 and z115) or (z115 and z91)
+z8 = ta.barssince(z29)
+z12 = ta.barssince(z44)
+z154 = z29 or (not na(z8) and z8 <= z58)
+z158 = z44 or (not na(z12) and z12 <= z58)
+z90 = z92 > z95 or z105 > z103 or z95 > z96
+z87 = z92 < z95 or z103 > z105 or z95 < z96
+z54 = not z163 or z90
+z53 = not z163 or z87
+z175 = not (z61 and z114) and not (z114 and z88)
+z174 = not (z62 and z115) and not (z115 and z91)
+z107 = z108 - z109
+z102 = z109 + z107 * 0.50
+z93 = z109 + z107 * 0.25
+z101 = z109 + z107 * 0.75
+z110 = not na(z108) and not na(z109) and z108 > z109
+z126 = z110 and close <= z102
+z128 = z110 and close >= z102
+z125 = z110 and close <= z93
+z127 = z110 and close >= z101
+z99 = z111 - z112
+z100 = not na(z111) and not na(z112) and z111 > z112
+z82 = close * z83
+z33 = z111 - z99 * 0.50
+z34 = z111 - z99 * 0.618
+z36 = math.min(z33, z34) - z82
+z35 = math.max(z33, z34) + z82
+z18 = z112 + z99 * 0.50
+z19 = z112 + z99 * 0.618
+z21 = math.min(z18, z19) - z82
+z20 = math.max(z18, z19) + z82
+z37 = z100 and low <= z35 and high >= z36
+z22 = z100 and high >= z21 and low <= z20
+z144 = ta.pivothigh(high, z145, z145)
+z146 = ta.pivotlow(low, z145, z145)
+z129 = ta.valuewhen(not na(z144), z144, 0)
+z130 = ta.valuewhen(not na(z146), z146, 0)
+z147 = ta.valuewhen(not na(z144), z144, 1)
+z148 = ta.valuewhen(not na(z146), z146, 1)
+z75 = not na(z129) and not na(z147) ? math.abs((z129 + z147) / 2) : na
+z80 = not na(z130) and not na(z148) ? math.abs((z130 + z148) / 2) : na
+z73 = not na(z75) and z75 > 0 ? math.abs(z129 - z147) / z75 : na
+z78 = not na(z80) and z80 > 0 ? math.abs(z130 - z148) / z80 : na
+z72 = not na(z73) and z73 <= z71
+z77 = not na(z78) and z78 <= z71
+z74 = z72 ? math.max(z129, z147) : na
+z79 = z77 ? math.min(z130, z148) : na
+z76 = z72 and high > z74 and close < z74
+z81 = z77 and low < z79 and close > z79
+z208 = ta.ema(hlc3, z193)
+z204 = ta.ema(math.abs(hlc3 - z208), z193)
+z203 = z204 > 0 ? (hlc3 - z208) / (0.015 * z204) : 0
+wtMain = ta.ema(z203, z192)
+z207 = ta.sma(wtMain, z196)
+z201 = ta.crossover(wtMain, z207)
+z199 = ta.crossunder(wtMain, z207)
+z202 = wtMain > z207
+z200 = wtMain < z207
+z206 = wtMain <= z195
+z205 = wtMain >= z194
+z47 = math.abs(close - open)
+z4 = ta.sma(z47, z30)
+z48 = high - low
+z191 = high - math.max(open, close)
+z138 = math.min(open, close) - low
+z165 = math.max(z47, syminfo.mintick)
 _c1a = close > open and close[1] < open[1]
-_c1b = close >= open[1] and open <= close[1] and z154 >= math.abs(close[1] - open[1]) * 0.80
-z104 = _c1a and _c1b
+_c1b = close >= open[1] and open <= close[1] and z47 >= math.abs(close[1] - open[1]) * 0.80
+z32 = _c1a and _c1b
 _c2a = close < open and close[1] > open[1]
-_c2b = close <= open[1] and open >= close[1] and z154 >= math.abs(close[1] - open[1]) * 0.80
-z98 = _c2a and _c2b
-z152 = z137 > 0 and z165 >= z87 * 2 and close >= low + z137 * 0.60
-z147 = z137 > 0 and z162 >= z87 * 2 and close <= high - z137 * 0.60
-z46 = z104 or z152
-z44 = z98 or z147
-_c3a = close > open and z154 >= z57 * 1.25
-_c3b = z137 > 0 and close >= low + z137 * 0.75
-z45 = _c3a and _c3b
-_c4a = close < open and z154 >= z57 * 1.25
-_c4b = z137 > 0 and close <= low + z137 * 0.25
-z52 = _c4a and _c4b
-z69 = z46 or z45
-z65 = z44 or z52
-z74 = ta.highest(high, z130)[1]
-z73 = ta.lowest(low, z130)[1]
-z159 = barstate.isconfirmed and close > z74 and close > open
-z153 = barstate.isconfirmed and close < z73 and close < open
-z9 = ta.barssince(z99)
-z4 = ta.barssince(z94)
-z15 = ta.barssince(z46)
-z24 = ta.barssince(z44)
-z20 = ta.barssince(z115)
-z18 = ta.barssince(z118)
-z19 = ta.barssince(z89)
-z27 = ta.barssince(z103)
-z32 = ta.barssince(z123)
-z26 = ta.barssince(z140)
-z35 = not na(z9) and z9 <= z106
-z28 = not na(z4) and z4 <= z106
-z48 = not na(z15) and z15 <= z106
-z51 = not na(z24) and z24 <= z106
-z49 = not na(z20) and z20 <= z106
-z43 = not na(z18) and z18 <= z106
-z50 = not na(z19) and z19 <= z106
-z56 = not na(z27) and z27 <= z106
-z54 = not na(z32) and z32 <= z80
-z62 = not na(z26) and z26 <= z80
-z164 = (z110 ? 2 : 0) + (z173 ? 2 : 0) + (z176 ? 2 : 0) + (z115 ? 1 : 0) + (z160 ? 1 : 0) + (z89 ? 1 : 0) + (z123 ? 2 : 0) + (z111 ? 1 : 0) + (z46 ? 2 : 0) + (z45 ? 1 : 0) + (z174 ? 1 : 0) + (z99 ? 2 : 0)
-z175 = (z113 ? 2 : 0) + (z163 ? 2 : 0) + (z168 ? 2 : 0) + (z118 ? 1 : 0) + (z181 ? 1 : 0) + (z103 ? 1 : 0) + (z140 ? 2 : 0) + (z92 ? 1 : 0) + (z44 ? 2 : 0) + (z52 ? 1 : 0) + (z180 ? 1 : 0) + (z94 ? 2 : 0)
-z71 = (z29 ? 2 : 0) + (z50 ? 2 : 0) + (z49 ? 2 : 0) + (z35 ? 2 : 0) + (z48 ? 2 : 0) + (z54 ? 2 : 0) + (z159 ? 2 : 0) + (z111 ? 1 : 0) + (z45 ? 1 : 0) + (z174 ? 1 : 0)
-z66 = (z31 ? 2 : 0) + (z56 ? 2 : 0) + (z43 ? 2 : 0) + (z28 ? 2 : 0) + (z51 ? 2 : 0) + (z62 ? 2 : 0) + (z153 ? 2 : 0) + (z92 ? 1 : 0) + (z52 ? 1 : 0) + (z180 ? 1 : 0)
-z70 = (z90 ? 2 : 0) + (z50 ? 2 : 0) + (z49 ? 2 : 0) + (z35 ? 2 : 0) + (z48 ? 2 : 0) + (z54 ? 2 : 0) + (z159 ? 2 : 0) + (z111 ? 1 : 0) + (z45 ? 1 : 0) + (z174 ? 1 : 0)
-z55 = (z90 ? 2 : 0) + (z56 ? 2 : 0) + (z43 ? 2 : 0) + (z28 ? 2 : 0) + (z51 ? 2 : 0) + (z62 ? 2 : 0) + (z153 ? 2 : 0) + (z92 ? 1 : 0) + (z52 ? 1 : 0) + (z180 ? 1 : 0)
-z53 = not z76 or z115
-z42 = not z76 or z118
-_c5a = barstate.isconfirmed and z22 and z11 and z160
-_c5b = z72 and (z69 or z99) and z164 >= z108 and z53 and z91
-z37 = _c5a and _c5b
-_c6a = barstate.isconfirmed and z22 and z13 and z181
-_c6b = z78 and (z65 or z94) and z175 >= z108 and z42 and z84
-z39 = _c6a and _c6b
-_c7a = barstate.isconfirmed and z22 and z1 and z29
-_c7b = z8 and z159 and z71 >= z108 and z91
-z2 = _c7a and _c7b
-_c8a = barstate.isconfirmed and z22 and z1 and z31
-_c8b = z12 and z153 and z66 >= z108 and z84
-z0 = _c8a and _c8b
-_c9a = barstate.isconfirmed and z22 and z25 and z90
-_c9b = z3 and z159 and z70 >= z108 and z91
-z33 = _c9a and _c9b
-_c10a = barstate.isconfirmed and z22 and z25 and z90
-_c10b = z6 and z153 and z55 >= z108 and z84
-z23 = _c10a and _c10b
-z105 = z37 or z2 or z33
-z96 = z39 or z0 or z23
-z156 = z105 and not z96 and not z105[1]
-z134 = z96 and not z105 and not z96[1]
-z169 = z2 ? z71 : z33 ? z70 : z164
-z151 = z0 ? z66 : z23 ? z55 : z175
-z114 = z2 ? z95 : z33 ? z79 : z136
-z100 = z0 ? z95 : z23 ? z79 : z136
+_c2b = close <= open[1] and open >= close[1] and z47 >= math.abs(close[1] - open[1]) * 0.80
+z17 = _c2a and _c2b
+z39 = z48 > 0 and z138 >= z165 * 2 and close >= low + z48 * 0.60
+z24 = z48 > 0 and z191 >= z165 * 2 and close <= high - z48 * 0.60
+z40 = z32 or z39
+z25 = z17 or z24
+_c3a = close > open and z47 >= z4 * 1.25
+_c3b = z48 > 0 and close >= low + z48 * 0.75
+z38 = _c3a and _c3b
+_c4a = close < open and z47 >= z4 * 1.25
+_c4b = z48 > 0 and close <= low + z48 * 0.25
+z23 = _c4a and _c4b
+z184 = z40 or z38
+z183 = z25 or z23
+z43 = ta.highest(high, z31)[1]
+z28 = ta.lowest(low, z31)[1]
+z42 = barstate.isconfirmed and close > z43 and close > open
+z27 = barstate.isconfirmed and close < z28 and close < open
+z15 = ta.barssince(z81)
+z14 = ta.barssince(z76)
+z10 = ta.barssince(z40)
+z6 = ta.barssince(z25)
+z9 = ta.barssince(z37)
+z5 = ta.barssince(z22)
+z13 = ta.barssince(z125)
+z16 = ta.barssince(z127)
+z11 = ta.barssince(z201)
+z7 = ta.barssince(z199)
+z161 = not na(z15) and z15 <= z58
+z160 = not na(z14) and z14 <= z58
+z156 = not na(z10) and z10 <= z58
+z152 = not na(z6) and z6 <= z58
+z155 = not na(z9) and z9 <= z58
+z151 = not na(z5) and z5 <= z58
+z159 = not na(z13) and z13 <= z58
+z162 = not na(z16) and z16 <= z58
+z157 = not na(z11) and z11 <= z197
+z153 = not na(z7) and z7 <= z197
+z41 = (z62 ? 2 : 0) + (z115 ? 2 : 0) + (z91 ? 2 : 0) + (z37 ? 1 : 0) + (z126 ? 1 : 0) + (z125 ? 1 : 0) + (z201 ? 2 : 0) + (z206 ? 1 : 0) + (z40 ? 2 : 0) + (z38 ? 1 : 0) + (z89 ? 1 : 0) + (z81 ? 2 : 0)
+z26 = (z61 ? 2 : 0) + (z114 ? 2 : 0) + (z88 ? 2 : 0) + (z22 ? 1 : 0) + (z128 ? 1 : 0) + (z127 ? 1 : 0) + (z199 ? 2 : 0) + (z205 ? 1 : 0) + (z25 ? 2 : 0) + (z23 ? 1 : 0) + (z86 ? 1 : 0) + (z76 ? 2 : 0)
+z55 = (z154 ? 2 : 0) + (z159 ? 2 : 0) + (z155 ? 2 : 0) + (z161 ? 2 : 0) + (z156 ? 2 : 0) + (z157 ? 2 : 0) + (z42 ? 2 : 0) + (z206 ? 1 : 0) + (z38 ? 1 : 0) + (z89 ? 1 : 0)
+z57 = (z158 ? 2 : 0) + (z162 ? 2 : 0) + (z151 ? 2 : 0) + (z160 ? 2 : 0) + (z152 ? 2 : 0) + (z153 ? 2 : 0) + (z27 ? 2 : 0) + (z205 ? 1 : 0) + (z23 ? 1 : 0) + (z86 ? 1 : 0)
+z177 = (z178 ? 2 : 0) + (z159 ? 2 : 0) + (z155 ? 2 : 0) + (z161 ? 2 : 0) + (z156 ? 2 : 0) + (z157 ? 2 : 0) + (z42 ? 2 : 0) + (z206 ? 1 : 0) + (z38 ? 1 : 0) + (z89 ? 1 : 0)
+z181 = (z178 ? 2 : 0) + (z162 ? 2 : 0) + (z151 ? 2 : 0) + (z160 ? 2 : 0) + (z152 ? 2 : 0) + (z153 ? 2 : 0) + (z27 ? 2 : 0) + (z205 ? 1 : 0) + (z23 ? 1 : 0) + (z86 ? 1 : 0)
+z190 = not z164 or z37
+z189 = not z164 or z22
+_c5a = barstate.isconfirmed and z49 and z51 and z126
+_c5b = z202 and (z184 or z81) and z41 >= z140 and z190 and z67
+z143 = _c5a and _c5b
+_c6a = barstate.isconfirmed and z49 and z50 and z128
+_c6b = z200 and (z183 or z76) and z26 >= z140 and z189 and z66
+z142 = _c6a and _c6b
+_c7a = barstate.isconfirmed and z49 and z68 and z154
+_c7b = z54 and z42 and z55 >= z140 and z67
+z59 = _c7a and _c7b
+_c8a = barstate.isconfirmed and z49 and z68 and z158
+_c8b = z53 and z27 and z57 >= z140 and z66
+z60 = _c8a and _c8b
+_c9a = barstate.isconfirmed and z49 and z69 and z178
+_c9b = z175 and z42 and z177 >= z140 and z67
+z176 = _c9a and _c9b
+_c10a = barstate.isconfirmed and z49 and z69 and z178
+_c10b = z174 and z27 and z181 >= z140 and z66
+z180 = _c10a and _c10b
+z45 = z143 or z59 or z176
+z46 = z142 or z60 or z180
+z134 = z45 and not z46 and not z45[1]
+z169 = z46 and not z45 and not z46[1]
+z133 = z59 ? z55 : z176 ? z177 : z41
+z168 = z60 ? z57 : z180 ? z181 : z26
+z131 = z59 ? z56 : z176 ? z179 : z85
+z166 = z60 ? z56 : z180 ? z179 : z85
 f_legs(score) =>
-    score >= z102 ? 3 : score >= z82 ? 2 : score >= z108 ? 1 : 0
-z195 = f_legs(z169)
-z179 = f_legs(z151)
-z190 = ta.atr(z167)
-z117 = z190 * z63
-longSl = close - z117
-z203 = close + z117 * z129
-z206 = close + z117 * z126
-z204 = close + z117 * z125
-z205 = close + z117
-z188 = close - z117 * z129
-z196 = close - z117 * z126
-z189 = close - z117 * z125
-z185 = str.upper(str.replace_all(syminfo.ticker, "/", ""))
-z194 = str.replace_all(str.replace_all(str.replace_all(z185, ".P", ""), "PERP", ""), "!", "")
-z109(act, score, z207, legs, slP, tp1P, tp2P, tp3P) =>
-    base = '{"pass":"' + webhookPass + '","sym":"' + symClean + '","action":"' + act + '","strategy":"Scalp","score":' + str.tostring(score) + ',"risk":' + str.tostring(z207, "#.####") + ',"legs":' + str.tostring(legs) + ',"sl":' + str.tostring(slP, "#.########") + ',"tp1":' + str.tostring(tp1P, "#.########")
+    score >= z124 ? 3 : score >= z139 ? 2 : score >= z140 ? 1 : 0
+z132 = f_legs(z133)
+z167 = f_legs(z168)
+z3 = ta.atr(z1)
+z182 = z3 * z2
+longSl = close - z182
+z135 = close + z182 * z186
+z136 = close + z182 * z187
+z137 = close + z182 * z188
+z170 = close + z182
+z171 = close - z182 * z186
+z172 = close - z182 * z187
+z173 = close - z182 * z188
+z150 = str.upper(str.replace_all(syminfo.ticker, "/", ""))
+z185 = str.replace_all(str.replace_all(str.replace_all(z150, ".P", ""), "PERP", ""), "!", "")
+f_alert_json(act, score, riskPct, legs, slP, tp1P, tp2P, tp3P) =>
+    base = '{"pass":"' + z198 + '","sym":"' + z185 + '","action":"' + act + '","strategy":"Scalp","score":' + str.tostring(score) + ',"risk":' + str.tostring(riskPct, "#.####") + ',"legs":' + str.tostring(legs) + ',"sl":' + str.tostring(slP, "#.########") + ',"tp1":' + str.tostring(tp1P, "#.########")
     with2 = legs >= 2 ? base + ',"tp2":' + str.tostring(tp2P, "#.########") : base
     with3 = legs >= 3 ? with2 + ',"tp3":' + str.tostring(tp3P, "#.########") : with2
     with3 + ',"bar_time":"' + str.tostring(time) + '"}'
-if z156 and z195 > 0 and not na(z117) and z117 > 0
-    z207 = z114 * z195 / 3.0
-    msg = z109("buy", z169, z207, z195, longSl, z203, z206, z204)
+if z134 and z132 > 0 and not na(z182) and z182 > 0
+    riskPct = z131 * z132 / 3.0
+    msg = f_alert_json("buy", z133, riskPct, z132, longSl, z135, z136, z137)
     alert(msg, alert.freq_once_per_bar)
-    label.new(bar_index, low, "BUY L" + str.tostring(z195) + " s" + str.tostring(z169), style=label.style_label_up, color=color.new(color.green, 20), textcolor=color.white, size=size.small)
-if z134 and z179 > 0 and not na(z117) and z117 > 0
-    z207 = z100 * z179 / 3.0
-    msg = z109("sell", z151, z207, z179, z205, z188, z196, z189)
+    label.new(bar_index, low, "BUY L" + str.tostring(z132) + " s" + str.tostring(z133), style=label.style_label_up, color=color.new(color.green, 20), textcolor=color.white, size=size.small)
+if z169 and z167 > 0 and not na(z182) and z182 > 0
+    riskPct = z166 * z167 / 3.0
+    msg = f_alert_json("sell", z168, riskPct, z167, z170, z171, z172, z173)
     alert(msg, alert.freq_once_per_bar)
-    label.new(bar_index, high, "SELL L" + str.tostring(z179) + " s" + str.tostring(z151), style=label.style_label_down, color=color.new(color.red, 20), textcolor=color.white, size=size.small)
-plot(z200, "Fast HTF EMA10", color=color.new(color.teal, 30))
-plot(z208, "Fast HTF EMA23", color=color.new(color.orange, 30))
-z172(z156 and z195 > 0, title="Buy", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)
-z172(z134 and z179 > 0, title="Sell", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
+    label.new(bar_index, high, "SELL L" + str.tostring(z167) + " s" + str.tostring(z168), style=label.style_label_down, color=color.new(color.red, 20), textcolor=color.white, size=size.small)
+plot(z94, "Fast HTF EMA10", color=color.new(color.teal, 30))
+plot(z97, "Fast HTF EMA23", color=color.new(color.orange, 30))
+plotshape(z134 and z132 > 0, title="Buy", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)
+plotshape(z169 and z167 > 0, title="Sell", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
 var table info = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 70))
 if barstate.islast
     table.cell(info, 0, 0, "Scalp Live v5", text_color=color.white)
-    table.cell(info, 1, 0, z22 ? "TF OK" : "WRONG TF", text_color=z22 ? color.lime : color.red)
+    table.cell(info, 1, 0, z49 ? "TF OK" : "WRONG TF", text_color=z49 ? color.lime : color.red)
     table.cell(info, 0, 1, "Bull score", text_color=color.gray)
-    table.cell(info, 1, 1, str.tostring(z164), text_color=color.white)
+    table.cell(info, 1, 1, str.tostring(z41), text_color=color.white)
     table.cell(info, 0, 2, "Bear score", text_color=color.gray)
-    table.cell(info, 1, 2, str.tostring(z175), text_color=color.white)
+    table.cell(info, 1, 2, str.tostring(z26), text_color=color.white)
     table.cell(info, 0, 3, "EMA gate", text_color=color.gray)
-    table.cell(info, 1, 3, z91 ? "BULL" : z84 ? "BEAR" : "FLAT", text_color=color.white)
+    table.cell(info, 1, 3, z67 ? "BULL" : z66 ? "BEAR" : "FLAT", text_color=color.white)
     table.cell(info, 0, 4, "Regime", text_color=color.gray)
-    table.cell(info, 1, 4, z11 ? "BULL" : z13 ? "BEAR" : "SIDE", text_color=color.white)
+    table.cell(info, 1, 4, z51 ? "BULL" : z50 ? "BEAR" : "SIDE", text_color=color.white)
     table.cell(info, 0, 5, "Tiers", text_color=color.gray)
-    table.cell(info, 1, 5, str.tostring(z108) + "/" + str.tostring(z82) + "/" + str.tostring(z102), text_color=color.white)
+    table.cell(info, 1, 5, str.tostring(z140) + "/" + str.tostring(z139) + "/" + str.tostring(z124), text_color=color.white)
