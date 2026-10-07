@@ -178,14 +178,22 @@ candleRange = high - low
 upperWick = high - math.max(open, close)
 lowerWick = math.min(open, close) - low
 safeCandleBody = math.max(candleBody, syminfo.mintick)
-bullEngulfing = close > open and close[1] < open[1] and close >= open[1] and open <= close[1] and candleBody >= math.abs(close[1] - open[1]) * 0.80
-bearEngulfing = close < open and close[1] > open[1] and close <= open[1] and open >= close[1] and candleBody >= math.abs(close[1] - open[1]) * 0.80
+_c1a = close > open and close[1] < open[1]
+_c1b = close >= open[1] and open <= close[1] and candleBody >= math.abs(close[1] - open[1]) * 0.80
+bullEngulfing = _c1a and _c1b
+_c2a = close < open and close[1] > open[1]
+_c2b = close <= open[1] and open >= close[1] and candleBody >= math.abs(close[1] - open[1]) * 0.80
+bearEngulfing = _c2a and _c2b
 bullPinBar = candleRange > 0 and lowerWick >= safeCandleBody * 2 and close >= low + candleRange * 0.60
 bearPinBar = candleRange > 0 and upperWick >= safeCandleBody * 2 and close <= high - candleRange * 0.60
 bullReversalCandle = bullEngulfing or bullPinBar
 bearReversalCandle = bearEngulfing or bearPinBar
-bullMomentumCandle = close > open and candleBody >= averageCandleBody * 1.25 and candleRange > 0 and close >= low + candleRange * 0.75
-bearMomentumCandle = close < open and candleBody >= averageCandleBody * 1.25 and candleRange > 0 and close <= low + candleRange * 0.25
+_c3a = close > open and candleBody >= averageCandleBody * 1.25
+_c3b = candleRange > 0 and close >= low + candleRange * 0.75
+bullMomentumCandle = _c3a and _c3b
+_c4a = close < open and candleBody >= averageCandleBody * 1.25
+_c4b = candleRange > 0 and close <= low + candleRange * 0.25
+bearMomentumCandle = _c4a and _c4b
 strongBullCandle = bullReversalCandle or bullMomentumCandle
 strongBearCandle = bearReversalCandle or bearMomentumCandle
 
@@ -226,14 +234,26 @@ trendBullFibPassed = not requireTrendFib or bullFibTouch
 trendBearFibPassed = not requireTrendFib or bearFibTouch
 
 // Entry gate uses minTradeScore so low-confidence 1-leg trades can still fire.
-normalBullCandidate = barstate.isconfirmed and chartTimeframeAllowed and confirmedBullishRegime and inDiscount and wtBullDirection and (strongBullCandle or equalLowSweep) and bullScore >= minTradeScore and trendBullFibPassed and emaBullAligned
-normalBearCandidate = barstate.isconfirmed and chartTimeframeAllowed and confirmedBearishRegime and inPremium and wtBearDirection and (strongBearCandle or equalHighSweep) and bearScore >= minTradeScore and trendBearFibPassed and emaBearAligned
+_c5a = barstate.isconfirmed and chartTimeframeAllowed and confirmedBullishRegime and inDiscount
+_c5b = wtBullDirection and (strongBullCandle or equalLowSweep) and bullScore >= minTradeScore and trendBullFibPassed and emaBullAligned
+normalBullCandidate = _c5a and _c5b
+_c6a = barstate.isconfirmed and chartTimeframeAllowed and confirmedBearishRegime and inPremium
+_c6b = wtBearDirection and (strongBearCandle or equalHighSweep) and bearScore >= minTradeScore and trendBearFibPassed and emaBearAligned
+normalBearCandidate = _c6a and _c6b
 
-countertrendBuyCandidate = barstate.isconfirmed and chartTimeframeAllowed and enableCountertrendTrades and recentBearishContext and counterBullShiftPassed and bullishBOS and counterBuyScore >= minTradeScore and emaBullAligned
-countertrendSellCandidate = barstate.isconfirmed and chartTimeframeAllowed and enableCountertrendTrades and recentBullishContext and counterBearShiftPassed and bearishBOS and counterSellScore >= minTradeScore and emaBearAligned
+_c7a = barstate.isconfirmed and chartTimeframeAllowed and enableCountertrendTrades and recentBearishContext
+_c7b = counterBullShiftPassed and bullishBOS and counterBuyScore >= minTradeScore and emaBullAligned
+countertrendBuyCandidate = _c7a and _c7b
+_c8a = barstate.isconfirmed and chartTimeframeAllowed and enableCountertrendTrades and recentBullishContext
+_c8b = counterBearShiftPassed and bearishBOS and counterSellScore >= minTradeScore and emaBearAligned
+countertrendSellCandidate = _c8a and _c8b
 
-sidewaysBuyCandidate = barstate.isconfirmed and chartTimeframeAllowed and enableSidewaysTrades and sidewaysRegime and sidewaysBullBiasAllowed and bullishBOS and sidewaysBuyScore >= minTradeScore and emaBullAligned
-sidewaysSellCandidate = barstate.isconfirmed and chartTimeframeAllowed and enableSidewaysTrades and sidewaysRegime and sidewaysBearBiasAllowed and bearishBOS and sidewaysSellScore >= minTradeScore and emaBearAligned
+_c9a = barstate.isconfirmed and chartTimeframeAllowed and enableSidewaysTrades and sidewaysRegime
+_c9b = sidewaysBullBiasAllowed and bullishBOS and sidewaysBuyScore >= minTradeScore and emaBullAligned
+sidewaysBuyCandidate = _c9a and _c9b
+_c10a = barstate.isconfirmed and chartTimeframeAllowed and enableSidewaysTrades and sidewaysRegime
+_c10b = sidewaysBearBiasAllowed and bearishBOS and sidewaysSellScore >= minTradeScore and emaBearAligned
+sidewaysSellCandidate = _c10a and _c10b
 
 candidateLong = normalBullCandidate or countertrendBuyCandidate or sidewaysBuyCandidate
 candidateShort = normalBearCandidate or countertrendSellCandidate or sidewaysSellCandidate
