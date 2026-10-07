@@ -18,6 +18,10 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 
 from flask import Flask, jsonify, request
+try:
+    from nasdaq_router import normalize_symbol, route_mode, fx_market, route_futures
+except ImportError:
+    from brain2.nasdaq_router import normalize_symbol, route_mode, fx_market, route_futures
 
 app = Flask(__name__)
 
@@ -508,6 +512,7 @@ def webhook():
             raw_symbol = data.get("symbol")
             log("DEPRECATED payload key 'symbol' accepted; TradingView must send 'sym'")
         symbol = str(raw_symbol or "").upper().replace("/", "")
+        symbol = normalize_symbol(symbol)
         strategy = str(data.get("strategy", "unknown")).strip().title()
         score = int(as_number(data.get("score", 0), "score"))
         risk_pct = min(max(as_number(data.get("risk", 1.0), "risk"), 0.0), MAX_RISK_PCT)
@@ -517,6 +522,15 @@ def webhook():
 
         if action not in ("buy", "sell"):
             raise ValueError("action must be buy or sell")
+        if symbol == "NAS100":
+            mode, why = route_mode()
+            log(f"NASDAQ signal {raw_symbol!r} -> mode={mode} ({why})")
+            if mode is None:
+                return jsonify({"status": "ok", "signal_status": "blocked_nasdaq_disabled", "reason": why}), 200
+            if mode == "futures":
+                return jsonify({"status": "ok", "signal_status": "futures_dry_run",
+                                "detail": route_futures(symbol, action, risk_pct, sl, targets)}), 200
+            MARKET_MAP["NAS100"] = fx_market()
         if symbol in CTRADER_SYMBOLS:
             context, context_error = read_market_context()
             approved, reason, required_score = intelligence_check(
